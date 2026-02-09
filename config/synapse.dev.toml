@@ -1,0 +1,41 @@
+# Synapse local development configuration for Beacon
+#
+# Provides LLM routing for beacon-gateway via OpenAI and Anthropic providers.
+# API keys are read from environment variables (set in .env.local).
+
+[server]
+# Bind to localhost on port 6000 for local dev
+listen_address = "127.0.0.1:6000"
+
+[server.health]
+enabled = true
+path = "/health"
+
+# Disable MCP for local dev (not needed for voice pipeline)
+[mcp]
+enabled = false
+
+# LLM routing configuration
+[llm]
+enabled = true
+
+[llm.protocols.openai]
+enabled = true
+path = "/llm/openai"
+
+[llm.providers.openai]
+type = "openai"
+api_key = "{{ env.OPENAI_API_KEY }}"
+model_filter = "^(gpt-|o[1-9]|chatgpt-).*"
+
+[llm.providers.anthropic]
+type = "anthropic"
+api_key = "{{ env.ANTHROPIC_API_KEY }}"
+model_filter = "^claude-.*"
+
+# Disable telemetry for local dev
+[telemetry]
+service_name = "synapse-dev"
+
+[telemetry.exporters.otlp]
+enabled = false

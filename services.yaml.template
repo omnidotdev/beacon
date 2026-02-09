@@ -1,0 +1,45 @@
+# Beacon Services Configuration
+# Copy to services.yaml and customize
+#
+# Format:
+#   services:
+#     - name:
+#         repo: repository URL (required)
+#         path: local path (optional, defaults to services/name)
+#         metarepo: true if this is a metarepo with services/ subdirectory
+#         env: environment variables (optional)
+
+services:
+  # ----------------------------
+  # Platform dependencies (metarepos)
+  # ----------------------------
+  # HIDRA - Identity platform (includes gatekeeper for OAuth)
+  - hidra:
+      repo: git@github.com:omnidotdev/hidra#master
+      path: ../hidra
+      metarepo: true
+
+  # ----------------------------
+  # AI routing
+  # ----------------------------
+  # Synapse - AI router for LLM, MCP, STT, TTS
+  # Configured directly in the Tiltfile (not a services.yaml entry).
+  # Expects source at ~/projects/omni/synapse.
+  # Dev config: config/synapse.dev.toml
+
+  # ----------------------------
+  # Beacon services
+  # ----------------------------
+  # Core gateway daemon
+  - beacon-gateway:
+      repo: https://github.com/omnidotdev/beacon-gateway#master
+
+  # Unified app (desktop + mobile + web)
+  - beacon-app:
+      repo: https://github.com/omnidotdev/beacon-app#master
+
+  # Omni CLI for agent core (uses local path)
+  # Uncomment to include CLI in this workspace
+  # - omni-cli:
+  #     repo: https://github.com/omnidotdev/cli#master
+  #     path: ~/projects/omni/cli

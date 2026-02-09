@@ -1,0 +1,28 @@
+# Ignore all by default (whitelist pattern)
+*
+
+# Metarepo config files
+!.gitignore
+!LICENSE.md
+!README.md
+!services.yaml.template
+!Tiltfile
+!.env.local.template
+!renovate.json
+
+# Allow directories (but not their contents by default)
+!services/
+services/*
+
+# Persona configs
+!personas/
+!personas/**
+
+# Service configs
+!config/
+!config/**
+
+# Scripts
+!scripts/
+!scripts/**
+
