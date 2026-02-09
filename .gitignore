@@ -6,4 +6,3 @@
 !README.md
 !services.yaml.template
 !Tiltfile
-!.env.local.template
