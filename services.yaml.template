@@ -34,6 +34,10 @@ services:
   - beacon-gateway:
       repo: https://github.com/omnidotdev/beacon-gateway#master
 
+  # Backend API (Elysia + GraphQL)
+  - beacon-api:
+      repo: https://github.com/omnidotdev/beacon-api#master
+
   # Unified app (desktop + mobile + web)
   - beacon-app:
       repo: https://github.com/omnidotdev/beacon-app#master
