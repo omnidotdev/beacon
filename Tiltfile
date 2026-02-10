@@ -24,7 +24,7 @@ services = read_yaml(config_path).get("services", [])
 # ------------------------------------
 
 # Synapse - AI router (LLM, MCP, STT, TTS)
-synapse_path = "%s/projects/omni/synapse" % os.environ["HOME"]
+synapse_path = "%s/projects/omni/synapse/services/synapse-server" % os.environ["HOME"]
 synapse_config = os.path.abspath("config/synapse.dev.toml")
 
 if os.path.exists(synapse_path):
