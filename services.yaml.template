@@ -15,8 +15,8 @@ services:
   # ----------------------------
   # HIDRA - Identity platform (includes gatekeeper for OAuth)
   - hidra:
-      repo: git@github.com:omnidotdev/hidra#master
-      path: ../hidra
+      repo: git@github.com:omnidotdev/hidra-stack#master
+      path: ../hidra-stack
       metarepo: true
 
   # ----------------------------
