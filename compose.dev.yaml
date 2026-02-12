@@ -1,0 +1,15 @@
+# Development override - build from source instead of pulling images
+# Usage: docker compose -f compose.yaml -f compose.dev.yaml up
+
+services:
+  gateway:
+    build: ./services/beacon-gateway
+    image: beacon-gateway:dev
+
+  api:
+    build: ./services/beacon-api
+    image: beacon-api:dev
+
+  app:
+    build: ./services/beacon-app
+    image: beacon-app:dev
