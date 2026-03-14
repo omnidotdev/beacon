@@ -433,6 +433,106 @@ impl SessionRepo {
         })
     }
 
+    /// Delete a session and all its messages
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database operation fails
+    pub fn delete_session(&self, session_id: &str) -> Result<()> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        conn.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])
+            .map_err(|e| Error::Database(e.to_string()))?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", [session_id])
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Delete sessions older than the given number of days
+    ///
+    /// Returns the number of sessions deleted
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database operation fails
+    pub fn prune_older_than(&self, days: i64) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+
+        // Get session IDs to delete
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions WHERE updated_at < ?1")
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        let session_ids: Vec<String> = stmt
+            .query_map([&cutoff], |row| row.get(0))
+            .map_err(|e| Error::Database(e.to_string()))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        let count = session_ids.len();
+
+        // Delete messages first (foreign key)
+        for sid in &session_ids {
+            conn.execute("DELETE FROM messages WHERE session_id = ?1", [sid])
+                .map_err(|e| Error::Database(e.to_string()))?;
+        }
+
+        // Delete sessions
+        conn.execute("DELETE FROM sessions WHERE updated_at < ?1", [&cutoff])
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(count)
+    }
+
+    /// Count total sessions
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database operation fails
+    pub fn count(&self) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Get total disk usage of all messages (approximate, in bytes)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database operation fails
+    pub fn disk_usage(&self) -> Result<usize> {
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(usize::try_from(total).unwrap_or(0))
+    }
+
     /// Count messages in a session
     ///
     /// # Errors

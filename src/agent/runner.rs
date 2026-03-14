@@ -58,6 +58,8 @@ pub enum AgentNotifyEvent {
         output: String,
         is_error: bool,
     },
+    /// Typing indicator state change
+    Typing { active: bool },
 }
 
 /// Extract a short display label from tool arguments JSON
@@ -102,8 +104,14 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
         config.user_id.clone(),
     ));
 
-    // Fetch available tools
-    let exec_tool = Arc::new(crate::tools::BuiltinExecTool::default());
+    // Fetch available tools, wiring sandbox config if present
+    let exec_tool = {
+        let mut tool = crate::tools::BuiltinExecTool::default();
+        if let Some(ref sandbox) = state.sandbox_config {
+            tool = tool.with_sandbox(sandbox.clone());
+        }
+        Arc::new(tool)
+    };
     let tools = {
         let executor = crate::tools::executor::ToolExecutor::new(
             Arc::clone(&synapse),
@@ -123,6 +131,11 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
             synapse_client::Message::user(&config.prompt),
         ]
     };
+
+    // Emit typing start
+    if let Some(ref n) = config.notify {
+        let _ = n.send(AgentNotifyEvent::Typing { active: true }).await;
+    }
 
     let max_iter = config.max_iterations.min(20) as usize;
     let mut full_response = String::new();
@@ -334,22 +347,49 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
         break;
     }
 
+    // Emit typing stop
+    if let Some(ref n) = config.notify {
+        let _ = n.send(AgentNotifyEvent::Typing { active: false }).await;
+    }
+
+    let estimated_cost = crate::billing::pricing::estimate_cost(
+        &config.model,
+        total_input_tokens,
+        total_output_tokens,
+    );
+
+    let provider = state
+        .model_info
+        .as_ref()
+        .map_or_else(|| "unknown".to_owned(), |m| m.provider.clone());
+
     if let Some(recorder) = &state.usage_recorder {
         let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let provider = state
-            .model_info
-            .as_ref()
-            .map_or_else(|| "unknown".to_owned(), |m| m.provider.clone());
         recorder.record(synapse_billing::UsageEvent {
             entity_type: "user".to_owned(),
             entity_id: config.user_id.clone(),
             model: config.model.clone(),
-            provider,
+            provider: provider.clone(),
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
-            estimated_cost_usd: 0.0,
+            estimated_cost_usd: estimated_cost,
             idempotency_key,
         });
+    }
+
+    // Record usage locally
+    if let Some(ref usage_repo) = state.usage_repo
+        && let Err(e) = usage_repo.record(
+            &config.session_id,
+            "default",
+            &config.model,
+            &provider,
+            total_input_tokens,
+            total_output_tokens,
+            estimated_cost,
+        )
+    {
+        tracing::warn!(error = %e, "failed to record local usage");
     }
 
     // Store user message and assistant response

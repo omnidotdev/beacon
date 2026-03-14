@@ -49,6 +49,14 @@ pub struct BeaconConfigFile {
     /// Ecosystem service URLs
     #[serde(default)]
     pub ecosystem: EcosystemFileConfig,
+
+    /// Container sandbox configuration
+    #[serde(default)]
+    pub sandbox: Option<SandboxFileConfig>,
+
+    /// Media processing configuration
+    #[serde(default)]
+    pub media: MediaFileConfig,
 }
 
 /// Ecosystem service URLs
@@ -180,6 +188,34 @@ pub struct SkillsFileConfig {
     pub skill_include: Option<Vec<String>>,
     /// Skill exclude patterns for agent-level filtering
     pub skill_exclude: Option<Vec<String>>,
+}
+
+/// Container sandbox TOML configuration
+#[derive(Debug, Default, Deserialize)]
+pub struct SandboxFileConfig {
+    /// Container engine: "docker" or "podman" (auto-detected if empty)
+    pub engine: Option<String>,
+    /// Container image to use
+    pub image: Option<String>,
+    /// Memory limit (e.g. "512m")
+    pub memory_limit: Option<String>,
+    /// CPU limit (e.g. "1")
+    pub cpu_limit: Option<String>,
+    /// Enable container networking
+    pub network: Option<bool>,
+    /// Timeout in seconds
+    pub timeout_secs: Option<u64>,
+}
+
+/// Media processing TOML configuration
+#[derive(Debug, Default, Deserialize)]
+pub struct MediaFileConfig {
+    /// Maximum keyframes to extract from video
+    pub max_video_frames: Option<u32>,
+    /// Maximum image size in bytes
+    pub max_image_size_bytes: Option<usize>,
+    /// Vision model for image/video analysis
+    pub vision_model: Option<String>,
 }
 
 /// Load the TOML config file from the standard path

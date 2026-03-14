@@ -8,6 +8,10 @@ use crate::db::{Embedder, Memory, MemoryCategory, MemoryRepo};
 use crate::{Error, Result};
 
 /// Built-in memory tools for LLM direct memory management
+///
+/// Uses `MemoryRepo` directly for access to Beacon's richer search features
+/// (BM25+vector hybrid, temporal decay, MMR). `MemoryRepo` also implements
+/// `agent_core::memory::MemoryStore` for shared interface compatibility.
 pub struct BuiltinMemoryTools {
     memory_repo: MemoryRepo,
     embedder: Option<Arc<Embedder>>,
@@ -27,6 +31,14 @@ impl BuiltinMemoryTools {
             embedder,
             user_id,
         }
+    }
+
+    /// Get a reference to the underlying `MemoryRepo` as `dyn MemoryStore`
+    ///
+    /// Useful for passing to components that accept the shared trait interface.
+    #[must_use]
+    pub fn as_memory_store(&self) -> &dyn agent_core::memory::MemoryStore {
+        &self.memory_repo
     }
 
     /// Return tool definitions for all built-in memory tools

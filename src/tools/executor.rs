@@ -100,6 +100,8 @@ impl ToolExecutor {
     ///
     /// Returns error if Synapse tool listing fails
     pub async fn list_tools(&self) -> Result<Vec<synapse_client::ToolDefinition>> {
+        use agent_core::tools::ToolProvider;
+
         // Fetch Synapse MCP tools (gracefully degrade if unavailable, e.g. embedded mode)
         let mut definitions: Vec<synapse_client::ToolDefinition> = match self
             .synapse
@@ -132,8 +134,6 @@ impl ToolExecutor {
         }
 
         // Include built-in tool provider definitions
-        use agent_core::tools::ToolProvider;
-
         if let Some(ref mt) = self.memory_tools {
             definitions.extend(
                 mt.definitions()
@@ -298,7 +298,25 @@ async fn run_plugin_entry(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    // TODO: add "wasm" arm using Extism for sandboxed execution of untrusted plugins
+    // WASM plugins are handled via WasmPlugin, not subprocess
+    if ext == "wasm" {
+        let wasm_bytes = tokio::fs::read(entry_path).await.map_err(|e| {
+            Error::Tool(format!(
+                "failed to read WASM plugin {}: {e}",
+                entry_path.display()
+            ))
+        })?;
+
+        let plugin_name = entry_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wasm-plugin")
+            .to_string();
+
+        let mut plugin = crate::plugins::WasmPlugin::load(plugin_name, wasm_bytes, None)?;
+        return plugin.call_tool(tool_name, arguments);
+    }
+
     let mut cmd = match ext {
         "js" | "ts" | "mjs" | "mts" => {
             let mut c = tokio::process::Command::new("bun");

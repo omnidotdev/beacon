@@ -48,6 +48,8 @@ pub enum PluginTransport {
     Subprocess,
     /// MCP server over stdio
     McpStdio,
+    /// WebAssembly module (sandboxed via Extism)
+    Wasm,
 }
 
 /// Environment variable value (plain string or required marker)

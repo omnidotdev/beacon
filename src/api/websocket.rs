@@ -104,6 +104,8 @@ pub enum WsOutgoing {
         /// 0–100, absent if indeterminate
         percent: Option<u8>,
     },
+    /// Typing indicator
+    Typing { active: bool },
     /// Error occurred
     Error { code: String, message: String },
     /// Pong response
@@ -274,6 +276,32 @@ async fn handle_socket(
     if let Some(ref senders) = state_for_cleanup.ws_senders {
         senders.write().await.remove(&ws_push_key);
         tracing::debug!(key = %ws_push_key, "ws_push: deregistered sender");
+    }
+
+    // Trigger end-of-conversation indexing (best-effort)
+    if let Some(indexer) = state_for_cleanup.indexer.clone() {
+        let sid = session_id.clone();
+        let uid = gatekeeper_user_id
+            .clone()
+            .unwrap_or_else(|| session_id.clone());
+        let session_repo = state_for_cleanup.session_repo.clone();
+        tokio::spawn(async move {
+            let messages = session_repo.get_messages(&sid, 50).unwrap_or_default();
+            if messages.len() < 2 {
+                return;
+            }
+            let conversation: String = messages
+                .iter()
+                .map(|m| format!("{}: {}", m.role.as_display_str(), m.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Err(e) = indexer
+                .index_conversation(&uid, &conversation, Some(&sid), Some("web"))
+                .await
+            {
+                tracing::warn!(error = %e, "end-of-conversation indexing failed");
+            }
+        });
     }
 
     // Publish conversation ended event (best-effort)
@@ -668,6 +696,7 @@ async fn handle_chat_message(
                     output,
                     is_error,
                 },
+                AgentNotifyEvent::Typing { active } => WsOutgoing::Typing { active },
             };
             let _ = tx_notify.send(ws_msg).await;
         }

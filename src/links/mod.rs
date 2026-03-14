@@ -3,9 +3,12 @@
 //! Detects URLs in messages and extracts Open Graph / Twitter Card metadata
 
 mod config;
+pub mod content;
 mod detector;
+pub mod ssrf;
 
 pub use config::LinkConfig;
+pub use content::LinkContent;
 pub use detector::detect_urls;
 
 use std::num::NonZeroUsize;
@@ -46,6 +49,8 @@ pub struct LinkProcessor {
     client: Client,
     cache: Arc<Mutex<LruCache<String, LinkPreview>>>,
     config: LinkConfig,
+    /// Hosts allowed to bypass SSRF checks (e.g. internal services)
+    allowed_internal_hosts: Vec<String>,
 }
 
 impl LinkProcessor {
@@ -57,6 +62,7 @@ impl LinkProcessor {
     #[must_use]
     pub fn new(config: LinkConfig) -> Self {
         let cache_size = NonZeroUsize::new(100).expect("100 is non-zero");
+        let allowed_internal_hosts = config.allowed_internal_hosts.clone();
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(config.timeout_secs))
@@ -65,6 +71,7 @@ impl LinkProcessor {
                 .expect("failed to build HTTP client"),
             cache: Arc::new(Mutex::new(LruCache::new(cache_size))),
             config,
+            allowed_internal_hosts,
         }
     }
 
@@ -124,8 +131,42 @@ impl LinkProcessor {
         Ok(preview)
     }
 
+    /// Extract full page content from a URL (with SSRF validation)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if URL fails SSRF validation or fetching fails
+    pub async fn extract_content(
+        &self,
+        url: &str,
+        max_length: usize,
+    ) -> Result<content::LinkContent> {
+        ssrf::validate_url(url, &self.allowed_internal_hosts).await?;
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| Error::Link(format!("Failed to fetch URL: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Link(format!("HTTP error: {}", response.status())));
+        }
+
+        let html = response
+            .text()
+            .await
+            .map_err(|e| Error::Link(format!("Failed to read response: {e}")))?;
+
+        Ok(content::extract_content(url, &html, max_length))
+    }
+
     /// Fetch preview metadata from URL
     async fn fetch_preview(&self, url: &str) -> Result<LinkPreview> {
+        // Validate URL against SSRF before fetching
+        ssrf::validate_url(url, &self.allowed_internal_hosts).await?;
+
         let response = self
             .client
             .get(url)

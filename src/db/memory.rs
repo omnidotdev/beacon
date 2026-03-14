@@ -957,6 +957,117 @@ impl MemoryRepo {
     }
 }
 
+/// Implement agent-core's `MemoryStore` trait for shared interface compatibility
+///
+/// Maps between Beacon's rich `Memory`/`MemoryCategory` types and agent-core's
+/// `MemoryItem`/`MemoryCategory`. The underlying storage remains Beacon's
+/// SQLite+sqlite-vec hybrid search backend.
+#[async_trait::async_trait]
+impl agent_core::memory::MemoryStore for MemoryRepo {
+    async fn add(&self, item: agent_core::memory::MemoryItem) -> anyhow::Result<String> {
+        let category = match item.category {
+            agent_core::memory::MemoryCategory::Preference => MemoryCategory::Preference,
+            agent_core::memory::MemoryCategory::Fact => MemoryCategory::Fact,
+            agent_core::memory::MemoryCategory::Correction => MemoryCategory::Correction,
+            agent_core::memory::MemoryCategory::General => MemoryCategory::General,
+        };
+
+        let user_id = item.user_id.unwrap_or_else(|| "default".to_string());
+        let mut memory = Memory::new(user_id, category, item.content);
+
+        if item.pinned {
+            memory = memory.pinned();
+        }
+        for tag in &item.tags {
+            memory = memory.with_tag(tag);
+        }
+        if let Some(embedding) = item.embedding {
+            memory = memory.with_embedding(embedding);
+        }
+
+        let id = memory.id.clone();
+        Self::add(self, &memory)?;
+        Ok(id)
+    }
+
+    async fn get(&self, id: &str) -> anyhow::Result<Option<agent_core::memory::MemoryItem>> {
+        Ok(Self::get(self, id)?.map(to_core_item))
+    }
+
+    async fn list(
+        &self,
+        category: Option<agent_core::memory::MemoryCategory>,
+    ) -> anyhow::Result<Vec<agent_core::memory::MemoryItem>> {
+        let beacon_cat = category.as_ref().map(to_beacon_category);
+        // Use "default" user_id since trait doesn't pass one
+        let memories = Self::list(self, "default", beacon_cat)?;
+        Ok(memories.into_iter().map(to_core_item).collect())
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<agent_core::memory::MemoryItem>> {
+        let memories = self.search_keyword("default", query, limit.unwrap_or(10))?;
+        Ok(memories.into_iter().map(to_core_item).collect())
+    }
+
+    async fn delete(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(Self::delete(self, id)?)
+    }
+
+    async fn update(
+        &self,
+        id: &str,
+        content: Option<String>,
+        pinned: Option<bool>,
+    ) -> anyhow::Result<()> {
+        Self::update(self, id, content.as_deref(), pinned)?;
+        Ok(())
+    }
+
+    async fn get_context(
+        &self,
+        max_items: usize,
+    ) -> anyhow::Result<Vec<agent_core::memory::MemoryItem>> {
+        let memories = Self::get_context(self, "default", max_items)?;
+        Ok(memories.into_iter().map(to_core_item).collect())
+    }
+}
+
+/// Convert a Beacon `Memory` to agent-core `MemoryItem`
+fn to_core_item(memory: Memory) -> agent_core::memory::MemoryItem {
+    let category = match memory.category {
+        MemoryCategory::Preference => agent_core::memory::MemoryCategory::Preference,
+        MemoryCategory::Fact => agent_core::memory::MemoryCategory::Fact,
+        MemoryCategory::Correction => agent_core::memory::MemoryCategory::Correction,
+        MemoryCategory::General => agent_core::memory::MemoryCategory::General,
+    };
+
+    let mut item = agent_core::memory::MemoryItem::new(memory.content, category);
+    // Preserve the original ID instead of generating a new one
+    item.id = memory.id;
+    item.created_at = memory.created_at;
+    item.accessed_at = memory.accessed_at;
+    item.access_count = memory.access_count;
+    item.tags = memory.tags;
+    item.pinned = memory.pinned;
+    item.embedding = memory.embedding;
+    item.user_id = Some(memory.user_id);
+    item
+}
+
+/// Convert an agent-core `MemoryCategory` to Beacon's `MemoryCategory`
+const fn to_beacon_category(cat: &agent_core::memory::MemoryCategory) -> MemoryCategory {
+    match cat {
+        agent_core::memory::MemoryCategory::Preference => MemoryCategory::Preference,
+        agent_core::memory::MemoryCategory::Fact => MemoryCategory::Fact,
+        agent_core::memory::MemoryCategory::Correction => MemoryCategory::Correction,
+        agent_core::memory::MemoryCategory::General => MemoryCategory::General,
+    }
+}
+
 /// Internal struct for database row mapping
 struct MemoryRow {
     id: String,

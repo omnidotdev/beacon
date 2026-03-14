@@ -28,6 +28,7 @@
 pub mod agent;
 pub mod api;
 pub mod attachments;
+pub mod backup;
 pub mod billing;
 pub mod canvas;
 pub mod channels;
@@ -36,6 +37,7 @@ pub mod context;
 pub mod daemon;
 pub mod db;
 pub mod discovery;
+pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod extensions;

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::Result;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 20;
 
 /// Initialize the database schema
 ///
@@ -70,6 +70,12 @@ pub fn init(conn: &Connection) -> Result<()> {
     }
     if version < 18 {
         migrate_v18(conn)?;
+    }
+    if version < 19 {
+        migrate_v19(conn)?;
+    }
+    if version < 20 {
+        migrate_v20(conn)?;
     }
 
     Ok(())
@@ -604,6 +610,51 @@ fn migrate_v18(conn: &Connection) -> Result<()> {
     )?;
 
     tracing::info!("migrated to schema v18 (skill location)");
+    Ok(())
+}
+
+fn migrate_v19(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        -- Add agent_id to sessions for multi-agent support
+        ALTER TABLE sessions ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default';
+
+        -- Update unique index to include agent_id
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+
+        PRAGMA user_version = 19;
+        ",
+    )?;
+
+    tracing::info!("migrated to schema v19 (multi-agent sessions)");
+    Ok(())
+}
+
+fn migrate_v20(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        -- Local usage tracking table
+        CREATE TABLE IF NOT EXISTS usage_records (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL DEFAULT 'default',
+            model TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_records(created_at);
+        CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records(model);
+
+        PRAGMA user_version = 20;
+        ",
+    )?;
+
+    tracing::info!("migrated to schema v20 (usage tracking)");
     Ok(())
 }
 

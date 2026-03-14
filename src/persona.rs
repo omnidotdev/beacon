@@ -281,6 +281,14 @@ pub struct MemoryConfig {
     /// Pruning strategy
     #[serde(default = "default_pruning_strategy")]
     pub pruning_strategy: String,
+
+    /// Maximum auto-captured memories per session
+    #[serde(default = "default_max_captures_per_session")]
+    pub max_captures_per_session: usize,
+}
+
+const fn default_max_captures_per_session() -> usize {
+    3
 }
 
 impl Default for MemoryConfig {
@@ -289,6 +297,7 @@ impl Default for MemoryConfig {
             max_context_tokens: default_max_context_tokens(),
             max_messages: default_max_messages(),
             pruning_strategy: default_pruning_strategy(),
+            max_captures_per_session: default_max_captures_per_session(),
         }
     }
 }

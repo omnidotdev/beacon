@@ -223,6 +223,8 @@ pub fn run_setup() -> anyhow::Result<()> {
         mcp_servers,
         life_json,
         ecosystem: existing.ecosystem,
+        sandbox: existing.sandbox,
+        media: existing.media,
     };
 
     write_config(&config_path, &config_file)?;

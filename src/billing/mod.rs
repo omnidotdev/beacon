@@ -4,6 +4,7 @@
 //! the Aether billing service. Enabled when `AETHER_URL` is set.
 
 pub mod middleware;
+pub mod pricing;
 
 use std::sync::Arc;
 use std::time::Duration;

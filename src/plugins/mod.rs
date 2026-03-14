@@ -7,7 +7,9 @@
 pub mod discovery;
 pub mod loader;
 pub mod manifest;
+pub mod wasm;
 
 pub use discovery::{default_plugin_dirs, discover_plugins};
 pub use loader::{LoadedPlugin, PluginManager};
 pub use manifest::{PluginKind, PluginManifest, PluginToolDef, PluginTransport};
+pub use wasm::WasmPlugin;

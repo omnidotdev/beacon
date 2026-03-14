@@ -10,6 +10,7 @@ mod schema;
 pub mod session;
 pub mod skill;
 pub mod telegram;
+pub mod usage;
 pub mod user;
 
 use std::path::Path;
@@ -57,6 +58,7 @@ pub use schema::SCHEMA_VERSION;
 pub use session::{Message, MessageRole, Session, SessionRepo};
 pub use skill::SkillRepo;
 pub use telegram::{TelegramGroupConfig, TelegramGroupConfigRepo};
+pub use usage::{UsageRecord, UsageRepo};
 pub use user::{User, UserContext, UserRepo};
 
 /// Database connection pool

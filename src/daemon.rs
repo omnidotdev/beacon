@@ -579,20 +579,31 @@ impl Daemon {
             }
         }
 
-        // Initialize vision client for image analysis (if Anthropic key available)
-        let vision = self
-            .config
-            .api_keys
-            .anthropic
-            .as_ref()
-            .and_then(|key| VisionClient::new(key.clone()).map(Arc::new).ok());
+        // Initialize vision client: prefer Synapse for provider-agnostic routing,
+        // fall back to direct Anthropic API if Synapse is unavailable
+        let vision: Option<Arc<VisionClient>> = if let Some(ref s) = synapse {
+            let mut client = VisionClient::from_synapse(Arc::clone(s));
+            if self.config.media.vision_model != "claude-sonnet-4-20250514" {
+                client = client.with_model(self.config.media.vision_model.clone());
+            }
+            Some(Arc::new(client))
+        } else {
+            self.config
+                .api_keys
+                .anthropic
+                .as_ref()
+                .and_then(|key| VisionClient::new(key).map(Arc::new).ok())
+        };
 
         // Create attachment processor with vision and Synapse (for audio transcription)
-        let attachment_processor = Arc::new(AttachmentProcessor::new(
-            vision,
-            synapse.as_ref().map(Arc::clone),
-            self.config.voice.stt_model.clone(),
-        ));
+        let attachment_processor = Arc::new(
+            AttachmentProcessor::new(
+                vision,
+                synapse.as_ref().map(Arc::clone),
+                self.config.voice.stt_model.clone(),
+            )
+            .with_max_video_frames(self.config.media.max_video_frames),
+        );
 
         // Construct local key store for self-hosted provider management
         let local_key_store = crate::providers::LocalKeyStore::new(self.db.clone());
@@ -687,7 +698,8 @@ impl Daemon {
         api_builder = api_builder
             .hook_manager(Arc::clone(&hook_manager))
             .pairing_manager(Arc::clone(&pairing_manager))
-            .attachment_processor(Arc::clone(&attachment_processor));
+            .attachment_processor(Arc::clone(&attachment_processor))
+            .sandbox_config(self.config.sandbox.clone());
 
         let api_server = api_builder.build();
         let _api_handle = api_server.spawn();
@@ -1755,6 +1767,58 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             }
         };
 
+        // Extract link content from URLs in the message (with SSRF protection)
+        let content_with_links = {
+            let link_config = crate::links::LinkConfig::default();
+            if link_config.enabled {
+                let link_processor = crate::links::LinkProcessor::new(link_config.clone());
+                let urls = crate::links::detect_urls(&content_with_attachments);
+                if urls.is_empty() {
+                    content_with_attachments
+                } else {
+                    let mut link_context = Vec::new();
+                    for url in urls.iter().take(link_config.max_urls) {
+                        if link_config.extract_content {
+                            match link_processor
+                                .extract_content(url, link_config.max_content_length)
+                                .await
+                            {
+                                Ok(content) => {
+                                    let title = content.title.as_deref().unwrap_or("Untitled");
+                                    link_context
+                                        .push(format!("[Link: {title}]\n{}\n", content.text));
+                                }
+                                Err(e) => {
+                                    tracing::debug!(url, error = %e, "link content extraction failed");
+                                }
+                            }
+                        } else {
+                            match link_processor.get_preview(url).await {
+                                Ok(preview) => {
+                                    let title = preview.title.as_deref().unwrap_or("Untitled");
+                                    let desc = preview.description.as_deref().unwrap_or("");
+                                    link_context.push(format!("[Link: {title}] {desc}"));
+                                }
+                                Err(e) => {
+                                    tracing::debug!(url, error = %e, "link preview failed");
+                                }
+                            }
+                        }
+                    }
+                    if link_context.is_empty() {
+                        content_with_attachments
+                    } else {
+                        format!(
+                            "{content_with_attachments}\n\n---\nReferenced links:\n{}",
+                            link_context.join("\n")
+                        )
+                    }
+                }
+            } else {
+                content_with_attachments
+            }
+        };
+
         // Inject knowledge based on user message
         if let Ok(ref mut ctx) = built_context
             && !knowledge_chunks.is_empty()
@@ -1762,7 +1826,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             let max_knowledge_tokens = max_context_tokens / 4;
             let selected = crate::knowledge::select_knowledge(
                 &knowledge_chunks,
-                &content_with_attachments,
+                &content_with_links,
                 max_knowledge_tokens,
             );
             if !selected.is_empty() {
@@ -1772,8 +1836,8 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
 
         // Build augmented prompt with context and history
         let augmented_prompt = match &built_context {
-            Ok(ctx) => ctx.format_prompt(&content_with_attachments),
-            Err(_) => content_with_attachments,
+            Ok(ctx) => ctx.format_prompt(&content_with_links),
+            Err(_) => content_with_links,
         };
 
         // Show typing indicator while processing

@@ -84,6 +84,77 @@ enum Command {
     },
     /// Interactive first-run setup
     Setup,
+    /// Run health diagnostics
+    Doctor,
+    /// Session management
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+    /// Configuration management
+    #[command(name = "config")]
+    ConfigCmd {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Backup and restore
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+}
+
+/// Session management subcommands
+#[derive(Subcommand)]
+enum SessionsCommand {
+    /// List all sessions
+    List,
+    /// Clean up old sessions
+    Cleanup {
+        /// Delete sessions older than N days
+        #[arg(long, default_value = "30")]
+        older_than_days: u64,
+    },
+}
+
+/// Configuration management subcommands
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Get a config value
+    Get {
+        /// Dotted key path (e.g. "llm.model")
+        key: String,
+    },
+    /// Set a config value
+    Set {
+        /// Dotted key path (e.g. "llm.model")
+        key: String,
+        /// Value to set
+        value: String,
+    },
+    /// Print config file path
+    Path,
+}
+
+/// Backup management subcommands
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Create a backup
+    Create {
+        /// Output file path
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Verify a backup
+    Verify {
+        /// Path to backup file
+        path: std::path::PathBuf,
+    },
+    /// Restore from a backup
+    Restore {
+        /// Path to backup file
+        path: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -128,6 +199,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Command::Status => cmd_status(),
             Command::Logs { lines, follow } => cmd_logs(lines, follow),
             Command::Setup => beacon_gateway::setup::run_setup(),
+            Command::Doctor => cmd_doctor(persona_ref).await,
+            Command::Sessions { command } => cmd_sessions(persona_ref, &command),
+            Command::ConfigCmd { command } => cmd_config(command),
+            Command::Backup { command } => cmd_backup(persona_ref, command),
         };
     }
 
@@ -413,4 +488,89 @@ fn cmd_logs(lines: usize, follow: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Run health diagnostics
+async fn cmd_doctor(persona: Option<&str>) -> anyhow::Result<()> {
+    let config = Config::load(persona)?;
+    let results = beacon_gateway::doctor::run_diagnostics(&config).await;
+    beacon_gateway::doctor::print_results(&results);
+    Ok(())
+}
+
+/// Session management commands
+fn cmd_sessions(persona: Option<&str>, command: &SessionsCommand) -> anyhow::Result<()> {
+    let config = Config::load(persona)?;
+    let db_path = config.data_dir.join("beacon.db");
+    let pool = db::init(&db_path)?;
+    let session_repo = beacon_gateway::db::SessionRepo::new(pool);
+
+    match command {
+        SessionsCommand::List => {
+            let sessions = session_repo.list_all()?;
+            let count = session_repo.count()?;
+            let disk = session_repo.disk_usage()?;
+
+            println!("{count} sessions ({} content bytes)\n", format_bytes(disk));
+
+            for session in &sessions {
+                let msg_count = session_repo.message_count(&session.id).unwrap_or(0);
+                println!(
+                    "  {} | {} | {} | {} msgs | {}",
+                    &session.id[..8],
+                    session.channel,
+                    session.persona_id,
+                    msg_count,
+                    session.updated_at.format("%Y-%m-%d %H:%M"),
+                );
+            }
+        }
+        SessionsCommand::Cleanup { older_than_days } => {
+            #[allow(clippy::cast_possible_wrap)]
+            let deleted = session_repo.prune_older_than(*older_than_days as i64)?;
+            println!("deleted {deleted} sessions older than {older_than_days} days");
+        }
+    }
+
+    Ok(())
+}
+
+/// Format bytes into human-readable string
+#[allow(clippy::cast_precision_loss)]
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Configuration management commands
+fn cmd_config(command: ConfigCommand) -> anyhow::Result<()> {
+    match command {
+        ConfigCommand::Get { key } => beacon_gateway::config::cli::config_get(&key),
+        ConfigCommand::Set { key, value } => beacon_gateway::config::cli::config_set(&key, &value),
+        ConfigCommand::Path => beacon_gateway::config::cli::config_path(),
+    }
+}
+
+/// Backup management commands
+fn cmd_backup(persona: Option<&str>, command: BackupCommand) -> anyhow::Result<()> {
+    let config = Config::load(persona)?;
+
+    match command {
+        BackupCommand::Create { output } => {
+            beacon_gateway::backup::create_backup(&config.data_dir, output.as_deref())?;
+            Ok(())
+        }
+        BackupCommand::Verify { path } => {
+            beacon_gateway::backup::verify_backup(&path)?;
+            Ok(())
+        }
+        BackupCommand::Restore { path } => {
+            beacon_gateway::backup::restore_backup(&path, &config.data_dir)
+        }
+    }
 }

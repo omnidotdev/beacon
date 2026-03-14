@@ -1,5 +1,6 @@
 //! Configuration management for Beacon gateway
 
+pub mod cli;
 pub mod file;
 #[cfg(feature = "embedded-synapse")]
 pub mod synapse_bridge;
@@ -100,6 +101,33 @@ pub struct Config {
 
     /// Ecosystem service URLs
     pub ecosystem: EcosystemConfig,
+
+    /// Container sandbox configuration for shell execution isolation
+    pub sandbox: Option<crate::tools::SandboxConfig>,
+
+    /// Media processing configuration
+    pub media: MediaConfig,
+}
+
+/// Media processing configuration
+#[derive(Debug, Clone)]
+pub struct MediaConfig {
+    /// Maximum keyframes to extract from video
+    pub max_video_frames: u32,
+    /// Maximum image size in bytes (images larger than this are skipped)
+    pub max_image_size_bytes: usize,
+    /// Vision model for image/video analysis
+    pub vision_model: String,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            max_video_frames: 3,
+            max_image_size_bytes: 10 * 1024 * 1024, // 10 MB
+            vision_model: "claude-sonnet-4-20250514".to_string(),
+        }
+    }
 }
 
 /// URLs for Omni ecosystem services (optional, graceful degradation)
@@ -1027,6 +1055,41 @@ impl Config {
                 chronicle_url: std::env::var("CHRONICLE_URL")
                     .ok()
                     .or(fc.ecosystem.chronicle_url),
+            },
+            sandbox: fc.sandbox.map(|s| {
+                let mut config = crate::tools::SandboxConfig::default();
+                if let Some(engine) = s.engine {
+                    config.engine = engine;
+                }
+                if let Some(image) = s.image {
+                    config.image = image;
+                }
+                if let Some(memory_limit) = s.memory_limit {
+                    config.memory_limit = memory_limit;
+                }
+                if let Some(cpu_limit) = s.cpu_limit {
+                    config.cpu_limit = cpu_limit;
+                }
+                if let Some(network) = s.network {
+                    config.network = network;
+                }
+                if let Some(timeout_secs) = s.timeout_secs {
+                    config.timeout_secs = timeout_secs;
+                }
+                config
+            }),
+            media: {
+                let mut media = MediaConfig::default();
+                if let Some(v) = fc.media.max_video_frames {
+                    media.max_video_frames = v;
+                }
+                if let Some(v) = fc.media.max_image_size_bytes {
+                    media.max_image_size_bytes = v;
+                }
+                if let Some(v) = fc.media.vision_model {
+                    media.vision_model = v;
+                }
+                media
             },
         })
     }

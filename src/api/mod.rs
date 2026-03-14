@@ -17,6 +17,7 @@ pub mod plugins;
 pub mod providers;
 pub mod rate_limit;
 pub mod skills;
+pub mod usage;
 pub mod voice;
 pub mod webhooks;
 pub mod websocket;
@@ -146,6 +147,10 @@ pub struct ApiState {
     pub reranker: Option<Arc<dyn agent_core::knowledge::Reranker>>,
     /// Direct MCP server manager
     pub mcp_manager: Option<Arc<crate::mcp::McpServerManager>>,
+    /// Container sandbox configuration for shell execution isolation
+    pub sandbox_config: Option<crate::tools::SandboxConfig>,
+    /// Local usage tracking repository
+    pub usage_repo: Option<crate::db::UsageRepo>,
 }
 
 impl ApiState {
@@ -228,6 +233,7 @@ pub struct ApiServerBuilder {
     condenser: Option<Arc<dyn agent_core::knowledge::QueryCondenser>>,
     reranker: Option<Arc<dyn agent_core::knowledge::Reranker>>,
     mcp_manager: Option<Arc<crate::mcp::McpServerManager>>,
+    sandbox_config: Option<crate::tools::SandboxConfig>,
 }
 
 impl ApiServerBuilder {
@@ -286,7 +292,15 @@ impl ApiServerBuilder {
             condenser: None,
             reranker: None,
             mcp_manager: None,
+            sandbox_config: None,
         }
+    }
+
+    /// Set the container sandbox configuration
+    #[must_use]
+    pub fn sandbox_config(mut self, config: Option<crate::tools::SandboxConfig>) -> Self {
+        self.sandbox_config = config;
+        self
     }
 
     /// Set the API key for admin endpoints
@@ -526,6 +540,7 @@ impl ApiServerBuilder {
         let memory_repo = MemoryRepo::new(self.db.clone());
         let skill_repo = SkillRepo::new(self.db.clone());
         let telegram_group_repo = TelegramGroupConfigRepo::new(self.db.clone());
+        let usage_repo = crate::db::UsageRepo::new(self.db.clone());
 
         // Create embedder and indexer if OPENAI_API_KEY is set
         let openai_key = std::env::var("OPENAI_API_KEY").ok();
@@ -666,6 +681,8 @@ impl ApiServerBuilder {
             condenser,
             reranker: self.reranker,
             mcp_manager: self.mcp_manager,
+            sandbox_config: self.sandbox_config,
+            usage_repo: Some(usage_repo),
         });
 
         ApiServer {
@@ -726,6 +743,7 @@ impl ApiServer {
                 "/api/plugins",
                 plugins::router(self.state.plugin_manager.clone()),
             )
+            .nest("/api", usage::router(self.state.clone()))
             .nest("/ws", websocket::router(self.state.clone()))
             .nest("/ws", nodes::ws_router(self.state.node_registry.clone()))
             .nest("/ws/canvas", canvas::router(self.state.canvas.clone()))

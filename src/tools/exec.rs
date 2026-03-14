@@ -8,21 +8,35 @@ use std::path::PathBuf;
 use agent_core::tools::shell::ShellTool;
 use agent_core::tools::{ToolKind, ToolProvider};
 
+use super::sandbox::{SandboxConfig, execute_sandboxed};
 use crate::{Error, Result};
 
 /// Built-in shell execution tool for LLM command execution
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinExecTool {
     inner: ShellTool,
+    /// Working directory (tracked separately for sandbox use)
+    working_dir: PathBuf,
+    /// Optional sandbox configuration for container-isolated execution
+    sandbox: Option<SandboxConfig>,
 }
 
 impl BuiltinExecTool {
     /// Create a new exec tool with the given working directory and extra PATH entries
     #[must_use]
-    pub const fn new(working_dir: PathBuf, extra_path: Vec<PathBuf>) -> Self {
+    pub fn new(working_dir: PathBuf, extra_path: Vec<PathBuf>) -> Self {
         Self {
-            inner: ShellTool::new(working_dir, extra_path),
+            inner: ShellTool::new(working_dir.clone(), extra_path),
+            working_dir,
+            sandbox: None,
         }
+    }
+
+    /// Enable container sandboxing for shell execution
+    #[must_use]
+    pub fn with_sandbox(mut self, config: SandboxConfig) -> Self {
+        self.sandbox = Some(config);
+        self
     }
 
     /// Return the tool definition for the `Bash` tool
@@ -92,6 +106,24 @@ impl ToolProvider for BuiltinExecTool {
             .command
             .filter(|c| !c.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("Bash: `command` parameter is required"))?;
+
+        // Use sandbox if configured, otherwise run directly
+        if let Some(ref sandbox_config) = self.sandbox {
+            let working_dir = self.working_dir.clone();
+            let sandbox_output =
+                execute_sandboxed(&command, &working_dir, sandbox_config, args.timeout)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Bash: {e}"))?;
+
+            let response = serde_json::json!({
+                "exit_code": sandbox_output.exit_code,
+                "stdout": sandbox_output.stdout,
+                "stderr": sandbox_output.stderr,
+                "sandboxed": sandbox_output.sandboxed,
+            });
+
+            return Ok(response.to_string());
+        }
 
         let output = self
             .inner

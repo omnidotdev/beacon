@@ -2,6 +2,7 @@
 //!
 //! Processes images, audio, and other attachments to augment message context
 
+mod video;
 mod vision;
 
 use std::sync::Arc;
@@ -23,6 +24,8 @@ pub struct AttachmentProcessor {
     stt_model: String,
     /// HTTP client for downloading attachments
     client: reqwest::Client,
+    /// Maximum keyframes to extract from video
+    max_video_frames: u32,
 }
 
 impl AttachmentProcessor {
@@ -38,7 +41,15 @@ impl AttachmentProcessor {
             synapse,
             stt_model,
             client: reqwest::Client::new(),
+            max_video_frames: 3,
         }
+    }
+
+    /// Set the maximum number of video keyframes to extract
+    #[must_use]
+    pub const fn with_max_video_frames(mut self, max_frames: u32) -> Self {
+        self.max_video_frames = max_frames;
+        self
     }
 
     /// Process all attachments and return augmented text
@@ -66,7 +77,7 @@ impl AttachmentProcessor {
         match attachment.kind {
             AttachmentKind::Image => self.process_image(attachment).await,
             AttachmentKind::Audio => self.process_audio(attachment).await,
-            AttachmentKind::Video => self.process_video(attachment),
+            AttachmentKind::Video => self.process_video(attachment).await,
             AttachmentKind::File => self.process_file(attachment),
         }
     }
@@ -169,13 +180,52 @@ impl AttachmentProcessor {
         }
     }
 
-    /// Process a video attachment (metadata only for now)
-    #[allow(clippy::unused_self)]
-    fn process_video(&self, attachment: &Attachment) -> String {
-        format!(
-            "[Video: {}]",
-            attachment.filename.as_deref().unwrap_or("video")
-        )
+    /// Process a video attachment by extracting keyframes and analyzing with vision
+    async fn process_video(&self, attachment: &Attachment) -> String {
+        let filename = attachment.filename.as_deref().unwrap_or("video");
+
+        let Some(vision) = &self.vision else {
+            return format!("[Video: {filename}]");
+        };
+
+        // Get video data
+        let video_data = match self.get_attachment_data(attachment).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to download video");
+                return format!("[Video: {filename} (could not download)]");
+            }
+        };
+
+        // Extract keyframes
+        let frames = match video::extract_keyframes(&video_data, self.max_video_frames).await {
+            Ok(frames) if !frames.is_empty() => frames,
+            Ok(_) => {
+                tracing::debug!("no keyframes extracted from video");
+                return format!("[Video: {filename}]");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "keyframe extraction failed");
+                return format!("[Video: {filename}]");
+            }
+        };
+
+        // Analyze each keyframe with vision
+        let mut descriptions = Vec::new();
+        for (i, frame_data) in frames.iter().enumerate() {
+            match vision.describe_image(frame_data, "image/jpeg").await {
+                Ok(desc) => descriptions.push(format!("Frame {}: {desc}", i + 1)),
+                Err(e) => {
+                    tracing::warn!(frame = i, error = %e, "vision analysis failed for keyframe");
+                }
+            }
+        }
+
+        if descriptions.is_empty() {
+            return format!("[Video: {filename}]");
+        }
+
+        format!("[Video: {filename}]\n{}", descriptions.join("\n"))
     }
 
     /// Process a generic file attachment

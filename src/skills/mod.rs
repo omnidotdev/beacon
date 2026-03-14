@@ -1,5 +1,6 @@
 //! Skills system for extensible agent capabilities
 
+pub mod bridge;
 pub mod install;
 mod manifold;
 mod types;
@@ -141,6 +142,18 @@ const BUNDLED_SKILLS: &[(&str, &str)] = &[
             "4. Keep it as short as possible while being complete\n",
             "5. End with a clear call to action\n",
             "6. Provide a subject line\n",
+        ),
+    ),
+    (
+        "model-usage",
+        concat!(
+            "---\nname: model-usage\ndescription: Report LLM usage and cost statistics\n",
+            "user_invocable: true\ntags:\n  - productivity\n  - billing\n---\n\n",
+            "When the user asks about their usage, costs, or token consumption:\n\n",
+            "1. Summarize total input/output tokens and estimated cost\n",
+            "2. Break down by model if multiple models were used\n",
+            "3. Show the time period covered\n",
+            "4. If costs seem high, suggest ways to optimize (shorter prompts, cheaper models)\n",
         ),
     ),
     (
