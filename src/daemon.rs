@@ -157,6 +157,40 @@ impl Daemon {
         // Initialize Synapse AI router client
         let (synapse, model_info) = Box::pin(self.init_synapse()).await;
 
+        // Initialize multi-agent registry
+        let agent_registry = if self.config.agents.is_empty() {
+            Arc::new(crate::agent::AgentRegistry::single(&self.config.data_dir))
+        } else {
+            let agents = self.config.agents.clone();
+            let default_id = agents.first().map(|a| a.id.0.clone());
+            Arc::new(crate::agent::AgentRegistry::new(agents, default_id))
+        };
+        tracing::info!(
+            count = agent_registry.len(),
+            default = %agent_registry.default_id(),
+            "agent registry initialized"
+        );
+
+        // Build binding router from agent configs
+        let binding_router = {
+            let mut bindings = Vec::new();
+            for agent in agent_registry.list() {
+                if let Some(ref channels) = agent.enabled_channels {
+                    for ch in channels {
+                        bindings.push(crate::agent::AgentBinding {
+                            channel: ch.clone(),
+                            account_id: None,
+                            agent_id: agent.id.0.clone(),
+                        });
+                    }
+                }
+            }
+            Arc::new(crate::agent::BindingRouter::new(
+                bindings,
+                agent_registry.default_id().to_string(),
+            ))
+        };
+
         // Get tool policy from persona, applying env var overrides
         let tool_policy = Arc::new(self.config.persona.tool_policy().with_env_overrides());
 
@@ -720,6 +754,8 @@ impl Daemon {
                 all_knowledge,
                 telegram_for_polling,
                 telegram_polling_rx,
+                Arc::clone(&binding_router),
+                Arc::clone(&agent_registry),
             )
             .await;
         } else {
@@ -768,6 +804,8 @@ impl Daemon {
         knowledge_chunks: Vec<crate::persona::KnowledgeChunk>,
         telegram: Option<TelegramChannel>,
         telegram_polling_rx: Option<tokio::sync::mpsc::Receiver<IncomingMessage>>,
+        binding_router: Arc<crate::agent::BindingRouter>,
+        agent_registry: Arc<crate::agent::AgentRegistry>,
     ) {
         let persona_id = self.config.persona.id().to_string();
         let persona_system_prompt = self.config.persona.system_prompt().map(String::from);
@@ -794,6 +832,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "discord",
@@ -816,6 +856,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -843,6 +885,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "slack",
@@ -865,6 +909,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -896,6 +942,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "whatsapp",
@@ -918,6 +966,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -951,6 +1001,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "signal",
@@ -973,6 +1025,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -1006,6 +1060,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "imessage",
@@ -1028,6 +1084,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -1063,6 +1121,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "matrix",
@@ -1085,6 +1145,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -1122,6 +1184,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "teams",
@@ -1144,6 +1208,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -1172,6 +1238,8 @@ impl Daemon {
                 let hooks = Arc::clone(&hook_manager);
                 let knowledge = knowledge_chunks.clone();
                 let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "google_chat",
@@ -1194,6 +1262,8 @@ impl Daemon {
                         max_context_tokens,
                         pm,
                         None,
+                        router,
+                        registry,
                     )
                     .await;
                 });
@@ -1218,6 +1288,8 @@ impl Daemon {
             let hooks = Arc::clone(&hook_manager);
             let knowledge = knowledge_chunks.clone();
             let pm = plugin_manager.clone();
+            let router = Arc::clone(&binding_router);
+            let registry = Arc::clone(&agent_registry);
             let tg_config = self.config.telegram.clone();
             tokio::spawn(async move {
                 handle_channel_messages(
@@ -1241,6 +1313,8 @@ impl Daemon {
                     max_context_tokens,
                     pm,
                     tg_config,
+                    router,
+                    registry,
                 )
                 .await;
             });
@@ -1584,6 +1658,8 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
     max_context_tokens: usize,
     plugin_manager: crate::api::plugins::SharedPluginManager,
     telegram_config: Option<crate::config::TelegramConfig>,
+    binding_router: Arc<crate::agent::BindingRouter>,
+    agent_registry: Arc<crate::agent::AgentRegistry>,
 ) {
     let exec_tool = Arc::new(crate::tools::BuiltinExecTool::default());
     let browser_tools = Arc::new(crate::tools::BuiltinBrowserTools::new());
@@ -1635,15 +1711,33 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             }
         };
 
-        let session =
-            match session_repo.find_or_create(&user.id, channel_name, &msg.channel_id, &persona_id)
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to find/create session");
-                    continue;
-                }
-            };
+        // Resolve agent for this channel/sender
+        let resolved_agent = binding_router.resolve(channel_name, Some(&msg.sender_id));
+        let agent_config = agent_registry.get(resolved_agent.as_str());
+        let effective_model = agent_config
+            .and_then(|a| a.model_override.as_deref())
+            .unwrap_or(&model_id);
+        tracing::debug!(
+            channel = channel_name,
+            sender = %msg.sender_id,
+            agent = %resolved_agent,
+            model = effective_model,
+            "resolved agent for message"
+        );
+
+        let session = match session_repo.find_or_create_with_agent(
+            &user.id,
+            channel_name,
+            &msg.channel_id,
+            &persona_id,
+            resolved_agent.as_str(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to find/create session");
+                continue;
+            }
+        };
 
         // Publish beacon.conversation.started for new sessions (best-effort)
         match session_repo.message_count(&session.id) {
@@ -1944,7 +2038,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
 
             for _turn in 0..10 {
                 let request = synapse_client::ChatRequest {
-                    model: model_id.clone(),
+                    model: effective_model.to_string(),
                     messages: llm_messages.clone(),
                     stream: use_streaming,
                     temperature: None,

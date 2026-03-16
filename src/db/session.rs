@@ -14,6 +14,7 @@ pub struct Session {
     pub channel: String,
     pub channel_id: String,
     pub persona_id: String,
+    pub agent_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -93,17 +94,33 @@ impl SessionRepo {
         channel_id: &str,
         persona_id: &str,
     ) -> Result<Session> {
+        self.find_or_create_with_agent(user_id, channel, channel_id, persona_id, "default")
+    }
+
+    /// Find or create a session for a channel conversation with agent routing
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database operation fails
+    pub fn find_or_create_with_agent(
+        &self,
+        user_id: &str,
+        channel: &str,
+        channel_id: &str,
+        persona_id: &str,
+        agent_id: &str,
+    ) -> Result<Session> {
         let conn = self
             .pool
             .get()
             .map_err(|e| Error::Database(e.to_string()))?;
 
-        // Try to find existing session
+        // Try to find existing session for this channel + agent
         let existing: Option<Session> = conn
             .query_row(
-                "SELECT id, user_id, channel, channel_id, persona_id, created_at, updated_at
-                 FROM sessions WHERE channel = ?1 AND channel_id = ?2",
-                [channel, channel_id],
+                "SELECT id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at
+                 FROM sessions WHERE channel = ?1 AND channel_id = ?2 AND agent_id = ?3",
+                [channel, channel_id, agent_id],
                 |row| {
                     Ok(Session {
                         id: row.get(0)?,
@@ -111,8 +128,9 @@ impl SessionRepo {
                         channel: row.get(2)?,
                         channel_id: row.get(3)?,
                         persona_id: row.get(4)?,
-                        created_at: parse_datetime(&row.get::<_, String>(5)?),
-                        updated_at: parse_datetime(&row.get::<_, String>(6)?),
+                        agent_id: row.get(5)?,
+                        created_at: parse_datetime(&row.get::<_, String>(6)?),
+                        updated_at: parse_datetime(&row.get::<_, String>(7)?),
                     })
                 },
             )
@@ -127,9 +145,9 @@ impl SessionRepo {
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO sessions (id, user_id, channel, channel_id, persona_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            [&id, user_id, channel, channel_id, persona_id, &now],
+            "INSERT INTO sessions (id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            rusqlite::params![&id, user_id, channel, channel_id, persona_id, agent_id, &now],
         )
         .map_err(|e| Error::Database(e.to_string()))?;
 
@@ -139,6 +157,7 @@ impl SessionRepo {
             channel: channel.to_string(),
             channel_id: channel_id.to_string(),
             persona_id: persona_id.to_string(),
+            agent_id: agent_id.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -157,7 +176,7 @@ impl SessionRepo {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, user_id, channel, channel_id, persona_id, created_at, updated_at
+                "SELECT id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )
             .map_err(|e| Error::Database(e.to_string()))?;
@@ -170,8 +189,9 @@ impl SessionRepo {
                     channel: row.get(2)?,
                     channel_id: row.get(3)?,
                     persona_id: row.get(4)?,
-                    created_at: parse_datetime(&row.get::<_, String>(5)?),
-                    updated_at: parse_datetime(&row.get::<_, String>(6)?),
+                    agent_id: row.get(5)?,
+                    created_at: parse_datetime(&row.get::<_, String>(6)?),
+                    updated_at: parse_datetime(&row.get::<_, String>(7)?),
                 })
             })
             .map_err(|e| Error::Database(e.to_string()))?

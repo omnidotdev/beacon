@@ -107,6 +107,9 @@ pub struct Config {
 
     /// Media processing configuration
     pub media: MediaConfig,
+
+    /// Multi-agent configurations (empty = single default agent)
+    pub agents: Vec<crate::agent::AgentConfig>,
 }
 
 /// Media processing configuration
@@ -1017,7 +1020,7 @@ impl Config {
         Ok(Self {
             persona,
             persona_cache_dir: cache_dir,
-            data_dir,
+            data_dir: data_dir.clone(),
             extension_dir,
             voice,
             api_keys,
@@ -1091,6 +1094,22 @@ impl Config {
                 }
                 media
             },
+            agents: fc
+                .agents
+                .into_iter()
+                .map(|a| {
+                    let agent_data_dir = data_dir.join("agents").join(&a.id);
+                    crate::agent::AgentConfig {
+                        id: crate::agent::AgentId::new(&a.id),
+                        persona_id: a.persona_id,
+                        model_override: a.model_override,
+                        skill_filter: a.skill_filter,
+                        workspace_dir: agent_data_dir,
+                        dm_policy_override: a.dm_policy_override.map(|s| DmPolicy::from_str(&s)),
+                        enabled_channels: a.enabled_channels,
+                    }
+                })
+                .collect(),
         })
     }
 

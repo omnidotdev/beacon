@@ -21,3 +21,4 @@ Lighting the beacon
 - 10 bundled skills: summarize, translate, code-review, explain, meeting-notes, proofread, data-analysis, email-draft, debug, and default
 - `beacon setup` wizard with channel configuration, MCP server discovery, and life.json setup
 - Consolidated shared modules into agent-core (loop detection, web fetch/search/readability, tool policy, skill types)
+- Multi-agent support: per-agent config (model override, persona, skill filter, DM policy), binding router for channel-to-agent routing, and agent-isolated sessions

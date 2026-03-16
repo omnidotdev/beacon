@@ -57,6 +57,39 @@ pub struct BeaconConfigFile {
     /// Media processing configuration
     #[serde(default)]
     pub media: MediaFileConfig,
+
+    /// Multi-agent configuration
+    #[serde(default)]
+    pub agents: Vec<AgentFileConfig>,
+}
+
+/// Per-agent configuration in TOML
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentFileConfig {
+    /// Unique agent identifier
+    pub id: String,
+    /// Optional persona override
+    pub persona_id: Option<String>,
+    /// Optional model override
+    pub model_override: Option<String>,
+    /// Optional skill filter (allowlist)
+    pub skill_filter: Option<Vec<String>>,
+    /// Optional DM policy override ("open", "pairing", "allowlist")
+    pub dm_policy_override: Option<String>,
+    /// Channels this agent is enabled for
+    pub enabled_channels: Option<Vec<String>>,
+    /// Channel-to-agent bindings
+    #[serde(default)]
+    pub bindings: Vec<AgentBindingFileConfig>,
+}
+
+/// Channel binding in TOML
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentBindingFileConfig {
+    /// Channel name
+    pub channel: String,
+    /// Optional channel-specific account ID
+    pub account_id: Option<String>,
 }
 
 /// Ecosystem service URLs
