@@ -22,3 +22,8 @@ Lighting the beacon
 - `beacon setup` wizard with channel configuration, MCP server discovery, and life.json setup
 - Consolidated shared modules into agent-core (loop detection, web fetch/search/readability, tool policy, skill types)
 - Multi-agent support: per-agent config (model override, persona, skill filter, DM policy), binding router for channel-to-agent routing, and agent-isolated sessions
+- Config hot-reload: watch config.toml for changes, classify and apply hot-reloadable sections without restart
+- IRC channel adapter for standard IRC protocol support
+- Gmail/email channel adapter with OAuth2 service account auth and polling
+- Extended hook lifecycle events: `session:created`, `session:ended`, `channel:connected`, `channel:disconnected`
+- PDF text extraction for message attachments via pdf-extract
