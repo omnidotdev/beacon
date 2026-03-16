@@ -170,6 +170,12 @@ pub struct ChannelsFileConfig {
 
     #[serde(default)]
     pub twilio: TwilioFileConfig,
+
+    #[serde(default)]
+    pub feishu: FeishuFileConfig,
+
+    #[serde(default)]
+    pub line: LineFileConfig,
 }
 
 /// Simple channel toggle (token lives in `api_keys`)
@@ -218,6 +224,30 @@ pub struct TwilioFileConfig {
     /// Phone number (E.164 format)
     pub phone_number: Option<String>,
     /// Webhook server port for inbound SMS
+    pub webhook_port: Option<u16>,
+}
+
+/// Feishu (Lark) channel configuration
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct FeishuFileConfig {
+    /// Feishu app ID
+    pub app_id: Option<String>,
+    /// Feishu app secret
+    pub app_secret: Option<String>,
+    /// Verification token for webhook validation
+    pub verification_token: Option<String>,
+    /// Webhook server port for inbound events
+    pub webhook_port: Option<u16>,
+}
+
+/// Line channel configuration
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct LineFileConfig {
+    /// Line channel access token
+    pub channel_access_token: Option<String>,
+    /// Line channel secret
+    pub channel_secret: Option<String>,
+    /// Webhook server port for inbound events
     pub webhook_port: Option<u16>,
 }
 

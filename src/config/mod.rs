@@ -98,6 +98,12 @@ pub struct Config {
     /// Twilio SMS channel configuration
     pub twilio: Option<crate::channels::twilio::TwilioConfig>,
 
+    /// Feishu (Lark) channel configuration
+    pub feishu: Option<crate::channels::feishu::FeishuConfig>,
+
+    /// Line channel configuration
+    pub line: Option<crate::channels::line::LineConfig>,
+
     /// Telegram-specific configuration (populated when token is present)
     pub telegram: Option<TelegramConfig>,
 
@@ -1051,6 +1057,62 @@ impl Config {
             }
         };
 
+        // Feishu config (env > toml > None) — only Some if app_id AND app_secret AND verification_token are set
+        let feishu = {
+            let feishu_toml = &fc.channels.feishu;
+            let app_id = std::env::var("FEISHU_APP_ID")
+                .ok()
+                .or_else(|| feishu_toml.app_id.clone());
+            let app_secret = std::env::var("FEISHU_APP_SECRET")
+                .ok()
+                .or_else(|| feishu_toml.app_secret.clone());
+            let verification_token = std::env::var("FEISHU_VERIFICATION_TOKEN")
+                .ok()
+                .or_else(|| feishu_toml.verification_token.clone());
+            match (app_id, app_secret, verification_token) {
+                (Some(app_id), Some(app_secret), Some(verification_token)) => {
+                    let webhook_port = std::env::var("FEISHU_WEBHOOK_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .or(feishu_toml.webhook_port)
+                        .unwrap_or(8091);
+                    Some(crate::channels::feishu::FeishuConfig {
+                        app_id,
+                        app_secret,
+                        verification_token,
+                        webhook_port,
+                    })
+                }
+                _ => None,
+            }
+        };
+
+        // Line config (env > toml > None) — only Some if channel_access_token AND channel_secret are set
+        let line = {
+            let line_toml = &fc.channels.line;
+            let channel_access_token = std::env::var("LINE_CHANNEL_ACCESS_TOKEN")
+                .ok()
+                .or_else(|| line_toml.channel_access_token.clone());
+            let channel_secret = std::env::var("LINE_CHANNEL_SECRET")
+                .ok()
+                .or_else(|| line_toml.channel_secret.clone());
+            match (channel_access_token, channel_secret) {
+                (Some(channel_access_token), Some(channel_secret)) => {
+                    let webhook_port = std::env::var("LINE_WEBHOOK_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .or(line_toml.webhook_port)
+                        .unwrap_or(8092);
+                    Some(crate::channels::line::LineConfig {
+                        channel_access_token,
+                        channel_secret,
+                        webhook_port,
+                    })
+                }
+                _ => None,
+            }
+        };
+
         // Telegram-specific config (assembled from token + env vars)
         let telegram = api_keys.telegram.as_ref().map(|token| {
             let mut tg = TelegramConfig::new(token.clone());
@@ -1159,6 +1221,8 @@ impl Config {
             irc,
             gmail,
             twilio,
+            feishu,
+            line,
             telegram,
             gatekeeper_url,
             gatekeeper_service_key,

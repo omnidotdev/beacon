@@ -86,6 +86,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Cryptography (device identity)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
