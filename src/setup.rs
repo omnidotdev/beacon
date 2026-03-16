@@ -226,6 +226,7 @@ pub fn run_setup() -> anyhow::Result<()> {
         sandbox: existing.sandbox,
         media: existing.media,
         agents: existing.agents,
+        routing: existing.routing,
     };
 
     write_config(&config_path, &config_file)?;

@@ -61,6 +61,10 @@ pub struct BeaconConfigFile {
     /// Multi-agent configuration
     #[serde(default)]
     pub agents: Vec<AgentFileConfig>,
+
+    /// Message routing rules
+    #[serde(default)]
+    pub routing: Vec<crate::routing::RoutingRule>,
 }
 
 /// Per-agent configuration in TOML

@@ -191,6 +191,17 @@ impl Daemon {
             ))
         };
 
+        // Build routing engine from config rules
+        let routing_engine = Arc::new(crate::routing::RoutingEngine::new(
+            self.config.routing_rules.clone(),
+        ));
+        if !self.config.routing_rules.is_empty() {
+            tracing::info!(
+                count = self.config.routing_rules.len(),
+                "routing engine initialized"
+            );
+        }
+
         // Get tool policy from persona, applying env var overrides
         let tool_policy = Arc::new(self.config.persona.tool_policy().with_env_overrides());
 
@@ -801,6 +812,7 @@ impl Daemon {
                 telegram_polling_rx,
                 Arc::clone(&binding_router),
                 Arc::clone(&agent_registry),
+                Arc::clone(&routing_engine),
             )
             .await;
         } else {
@@ -851,6 +863,7 @@ impl Daemon {
         telegram_polling_rx: Option<tokio::sync::mpsc::Receiver<IncomingMessage>>,
         binding_router: Arc<crate::agent::BindingRouter>,
         agent_registry: Arc<crate::agent::AgentRegistry>,
+        routing_engine: Arc<crate::routing::RoutingEngine>,
     ) {
         let persona_id = self.config.persona.id().to_string();
         let persona_system_prompt = self.config.persona.system_prompt().map(String::from);
@@ -883,6 +896,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "discord",
@@ -907,6 +921,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -940,6 +955,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "slack",
@@ -964,6 +980,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1001,6 +1018,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "whatsapp",
@@ -1025,6 +1043,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1064,6 +1083,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "signal",
@@ -1088,6 +1108,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1121,6 +1142,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "irc",
@@ -1145,6 +1167,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1179,6 +1202,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "gmail",
@@ -1203,6 +1227,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1237,6 +1262,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "twilio",
@@ -1261,6 +1287,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1295,6 +1322,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "feishu",
@@ -1319,6 +1347,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1352,6 +1381,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "line",
@@ -1376,6 +1406,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1415,6 +1446,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "imessage",
@@ -1439,6 +1471,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1480,6 +1513,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "matrix",
@@ -1504,6 +1538,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1547,6 +1582,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "teams",
@@ -1571,6 +1607,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1605,6 +1642,7 @@ impl Daemon {
                 let pm = plugin_manager.clone();
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
+                let routing = Arc::clone(&routing_engine);
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "google_chat",
@@ -1629,6 +1667,7 @@ impl Daemon {
                         None,
                         router,
                         registry,
+                        routing,
                     )
                     .await;
                 });
@@ -1658,6 +1697,7 @@ impl Daemon {
             let pm = plugin_manager.clone();
             let router = Arc::clone(&binding_router);
             let registry = Arc::clone(&agent_registry);
+            let routing = Arc::clone(&routing_engine);
             let tg_config = self.config.telegram.clone();
             tokio::spawn(async move {
                 handle_channel_messages(
@@ -1683,6 +1723,7 @@ impl Daemon {
                     tg_config,
                     router,
                     registry,
+                    routing,
                 )
                 .await;
             });
@@ -2028,6 +2069,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
     telegram_config: Option<crate::config::TelegramConfig>,
     binding_router: Arc<crate::agent::BindingRouter>,
     agent_registry: Arc<crate::agent::AgentRegistry>,
+    routing_engine: Arc<crate::routing::RoutingEngine>,
 ) {
     let exec_tool = Arc::new(crate::tools::BuiltinExecTool::default());
     let browser_tools = Arc::new(crate::tools::BuiltinBrowserTools::new());
@@ -2070,6 +2112,40 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             }
         }
 
+        // Routing: evaluate rules before agent dispatch
+        let routing_decision =
+            routing_engine.evaluate(channel_name, &msg.sender_id, &msg.content, msg.is_dm);
+        let routing_agent_override = match routing_decision {
+            crate::routing::RoutingDecision::Allow => None,
+            crate::routing::RoutingDecision::Deny => {
+                tracing::debug!(channel = channel_name, sender = %msg.sender_id, "routing: denied");
+                continue;
+            }
+            crate::routing::RoutingDecision::DenyWithReply(reply) => {
+                let outgoing = OutgoingMessage {
+                    channel_id: msg.channel_id.clone(),
+                    content: reply,
+                    reply_to: Some(msg.id.clone()),
+                    thread_id: None,
+                    keyboard: None,
+                    media: vec![],
+                    edit_target: None,
+                    voice_note: false,
+                };
+                if let Err(e) = channel.send(outgoing).await {
+                    tracing::error!(error = %e, "routing deny-reply send error");
+                }
+                continue;
+            }
+            crate::routing::RoutingDecision::RedirectToAgent(agent_id) => {
+                Some(crate::agent::AgentId::new(agent_id))
+            }
+            crate::routing::RoutingDecision::RateLimited => {
+                tracing::debug!(channel = channel_name, sender = %msg.sender_id, "routing: rate limited");
+                continue;
+            }
+        };
+
         // Find or create user and session
         let user = match user_repo.find_or_create(&msg.sender_id) {
             Ok(u) => u,
@@ -2079,8 +2155,9 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             }
         };
 
-        // Resolve agent for this channel/sender
-        let resolved_agent = binding_router.resolve(channel_name, Some(&msg.sender_id));
+        // Resolve agent for this channel/sender (routing redirect overrides binding)
+        let resolved_agent = routing_agent_override
+            .unwrap_or_else(|| binding_router.resolve(channel_name, Some(&msg.sender_id)));
         let agent_config = agent_registry.get(resolved_agent.as_str());
         let effective_model = agent_config
             .and_then(|a| a.model_override.as_deref())

@@ -127,6 +127,9 @@ pub struct Config {
 
     /// Multi-agent configurations (empty = single default agent)
     pub agents: Vec<crate::agent::AgentConfig>,
+
+    /// Message routing rules
+    pub routing_rules: Vec<crate::routing::RoutingRule>,
 }
 
 /// Media processing configuration
@@ -1292,6 +1295,7 @@ impl Config {
                     }
                 })
                 .collect(),
+            routing_rules: fc.routing,
         })
     }
 

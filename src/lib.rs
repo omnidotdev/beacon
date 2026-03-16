@@ -54,6 +54,7 @@ pub mod plugins;
 pub mod prompt;
 pub mod providers;
 pub mod relay;
+pub mod routing;
 pub mod security;
 pub mod setup;
 pub mod skills;
