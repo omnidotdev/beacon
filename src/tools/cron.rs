@@ -1,26 +1,43 @@
-//! Cron tools for scheduling recurring tasks via Vortex
+//! Cron tools for scheduling recurring tasks
 //!
 //! Provides agent-accessible tools for scheduling, listing, and canceling
-//! recurring tasks through the Vortex scheduling service
+//! recurring tasks through either the Vortex scheduling service or a local
+//! in-process scheduler
 
+use std::sync::Arc;
+
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use agent_core::tools::{ToolKind, ToolProvider};
 
 use crate::Result;
+use crate::cron::{CronAction, LocalScheduler};
 use crate::integrations::{ScheduleRequest, VortexClient};
 
-/// Tools for managing scheduled tasks via Vortex
+/// Backend for cron scheduling operations
+#[derive(Debug, Clone)]
+pub enum CronBackend {
+    /// Remote Vortex scheduling service
+    Vortex {
+        /// Vortex API client
+        client: VortexClient,
+        /// Base URL for callbacks
+        callback_base_url: String,
+    },
+    /// Local in-process scheduler
+    Local(Arc<LocalScheduler>),
+}
+
+/// Tools for managing scheduled tasks
 #[derive(Debug, Clone)]
 pub struct CronTools {
-    /// Vortex client for API calls
-    vortex: VortexClient,
-    /// Base URL for callbacks (e.g., `<http://localhost:8080/webhooks/vortex>`)
-    callback_base_url: String,
+    /// Scheduling backend
+    backend: CronBackend,
 }
 
 impl CronTools {
-    /// Create a new `CronTools` instance
+    /// Create a new `CronTools` instance with a Vortex backend
     ///
     /// # Arguments
     ///
@@ -29,8 +46,18 @@ impl CronTools {
     #[must_use]
     pub fn new(vortex: VortexClient, callback_base_url: impl Into<String>) -> Self {
         Self {
-            vortex,
-            callback_base_url: callback_base_url.into(),
+            backend: CronBackend::Vortex {
+                client: vortex,
+                callback_base_url: callback_base_url.into(),
+            },
+        }
+    }
+
+    /// Create a new `CronTools` instance with a local scheduler backend
+    #[must_use]
+    pub const fn local(scheduler: Arc<LocalScheduler>) -> Self {
+        Self {
+            backend: CronBackend::Local(scheduler),
         }
     }
 
@@ -48,7 +75,7 @@ impl CronTools {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Vortex API call fails
+    /// Returns an error if the scheduling operation fails
     ///
     /// # Examples
     ///
@@ -66,17 +93,32 @@ impl CronTools {
         action: &str,
         payload: serde_json::Value,
     ) -> Result<String> {
-        let request = ScheduleRequest {
-            cron: cron.to_string(),
-            callback_url: self.callback_base_url.clone(),
-            action: action.to_string(),
-            payload,
-            description: None,
-            timezone: None,
-        };
+        match &self.backend {
+            CronBackend::Vortex {
+                client,
+                callback_base_url,
+            } => {
+                let request = ScheduleRequest {
+                    cron: cron.to_string(),
+                    callback_url: callback_base_url.clone(),
+                    action: action.to_string(),
+                    payload,
+                    description: None,
+                    timezone: None,
+                };
 
-        let schedule = self.vortex.schedule(&request).await?;
-        Ok(schedule.id)
+                let schedule = client.schedule(&request).await?;
+                Ok(schedule.id)
+            }
+            CronBackend::Local(scheduler) => {
+                let cron_action = CronAction::Webhook {
+                    url: action.to_string(),
+                    payload: Some(payload),
+                };
+                let job = scheduler.schedule(cron, cron_action, None, None).await?;
+                Ok(job.id)
+            }
+        }
     }
 
     /// Schedule a recurring task with additional options
@@ -91,42 +133,98 @@ impl CronTools {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Vortex API call fails
+    /// Returns an error if the scheduling operation fails
     pub async fn schedule_with_options(&self, params: ScheduleParams) -> Result<String> {
-        let request = ScheduleRequest {
-            cron: params.cron,
-            callback_url: self.callback_base_url.clone(),
-            action: params.action,
-            payload: params.payload,
-            description: params.description,
-            timezone: params.timezone,
-        };
+        match &self.backend {
+            CronBackend::Vortex {
+                client,
+                callback_base_url,
+            } => {
+                let request = ScheduleRequest {
+                    cron: params.cron,
+                    callback_url: callback_base_url.clone(),
+                    action: params.action,
+                    payload: params.payload,
+                    description: params.description,
+                    timezone: params.timezone,
+                };
 
-        let schedule = self.vortex.schedule(&request).await?;
-        Ok(schedule.id)
+                let schedule = client.schedule(&request).await?;
+                Ok(schedule.id)
+            }
+            CronBackend::Local(scheduler) => {
+                let cron_action = CronAction::Webhook {
+                    url: params.action,
+                    payload: Some(params.payload),
+                };
+                let job = scheduler
+                    .schedule(
+                        &params.cron,
+                        cron_action,
+                        params.description,
+                        params.timezone,
+                    )
+                    .await?;
+                Ok(job.id)
+            }
+        }
     }
 
     /// List all scheduled tasks
     ///
     /// # Errors
     ///
-    /// Returns an error if the Vortex API call fails
+    /// Returns an error if the listing operation fails
     pub async fn list(&self) -> Result<Vec<ScheduleInfo>> {
-        let schedules = self.vortex.list_schedules().await?;
+        match &self.backend {
+            CronBackend::Vortex { client, .. } => {
+                let schedules = client.list_schedules().await?;
 
-        let infos = schedules
-            .into_iter()
-            .map(|s| ScheduleInfo {
-                id: s.id,
-                cron: s.cron,
-                action: s.action,
-                next_run: s.next_run.map(|dt| dt.to_rfc3339()),
-                description: s.description,
-                active: s.active,
-            })
-            .collect();
+                let infos = schedules
+                    .into_iter()
+                    .map(|s| ScheduleInfo {
+                        id: s.id,
+                        cron: s.cron,
+                        action: s.action,
+                        next_run: s.next_run.map(|dt| dt.to_rfc3339()),
+                        description: s.description,
+                        active: s.active,
+                    })
+                    .collect();
 
-        Ok(infos)
+                Ok(infos)
+            }
+            CronBackend::Local(scheduler) => {
+                let jobs = scheduler.list().await;
+
+                let infos = jobs
+                    .into_iter()
+                    .map(|job| {
+                        let next_run = croner::Cron::new(&job.schedule)
+                            .parse()
+                            .ok()
+                            .and_then(|c| c.find_next_occurrence(&Utc::now(), false).ok())
+                            .map(|dt| dt.to_rfc3339());
+
+                        let action = match &job.action {
+                            CronAction::AgentPrompt { channel, .. } => channel.clone(),
+                            CronAction::Webhook { url, .. } => url.clone(),
+                        };
+
+                        ScheduleInfo {
+                            id: job.id,
+                            cron: job.schedule,
+                            action,
+                            next_run,
+                            description: job.description,
+                            active: true,
+                        }
+                    })
+                    .collect();
+
+                Ok(infos)
+            }
+        }
     }
 
     /// Cancel a scheduled task
@@ -137,9 +235,12 @@ impl CronTools {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Vortex API call fails
+    /// Returns an error if the cancellation fails
     pub async fn cancel(&self, schedule_id: &str) -> Result<()> {
-        self.vortex.cancel_schedule(schedule_id).await
+        match &self.backend {
+            CronBackend::Vortex { client, .. } => client.cancel_schedule(schedule_id).await,
+            CronBackend::Local(scheduler) => scheduler.cancel(schedule_id).await,
+        }
     }
 
     /// Get details of a specific schedule
@@ -150,18 +251,47 @@ impl CronTools {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Vortex API call fails or schedule not found
+    /// Returns an error if the schedule is not found or the lookup fails
     pub async fn get(&self, schedule_id: &str) -> Result<ScheduleInfo> {
-        let schedule = self.vortex.get_schedule(schedule_id).await?;
+        match &self.backend {
+            CronBackend::Vortex { client, .. } => {
+                let schedule = client.get_schedule(schedule_id).await?;
 
-        Ok(ScheduleInfo {
-            id: schedule.id,
-            cron: schedule.cron,
-            action: schedule.action,
-            next_run: schedule.next_run.map(|dt| dt.to_rfc3339()),
-            description: schedule.description,
-            active: schedule.active,
-        })
+                Ok(ScheduleInfo {
+                    id: schedule.id,
+                    cron: schedule.cron,
+                    action: schedule.action,
+                    next_run: schedule.next_run.map(|dt| dt.to_rfc3339()),
+                    description: schedule.description,
+                    active: schedule.active,
+                })
+            }
+            CronBackend::Local(scheduler) => {
+                let job = scheduler.get(schedule_id).await.ok_or_else(|| {
+                    crate::Error::NotFound(format!("cron job not found: {schedule_id}"))
+                })?;
+
+                let next_run = croner::Cron::new(&job.schedule)
+                    .parse()
+                    .ok()
+                    .and_then(|c| c.find_next_occurrence(&Utc::now(), false).ok())
+                    .map(|dt| dt.to_rfc3339());
+
+                let action = match &job.action {
+                    CronAction::AgentPrompt { channel, .. } => channel.clone(),
+                    CronAction::Webhook { url, .. } => url.clone(),
+                };
+
+                Ok(ScheduleInfo {
+                    id: job.id,
+                    cron: job.schedule,
+                    action,
+                    next_run,
+                    description: job.description,
+                    active: true,
+                })
+            }
+        }
     }
 }
 
@@ -204,7 +334,7 @@ pub struct ScheduleInfo {
 /// Built-in cron tools wrapper for the tool executor
 ///
 /// Provides tool definitions and dispatch for the LLM to schedule,
-/// list, cancel, and inspect cron schedules via Vortex
+/// list, cancel, and inspect cron schedules
 pub struct BuiltinCronTools {
     cron: CronTools,
 }
@@ -301,7 +431,7 @@ impl BuiltinCronTools {
     ///
     /// # Errors
     ///
-    /// Returns error if arguments are malformed or the Vortex API call fails
+    /// Returns error if arguments are malformed or the backend call fails
     pub async fn execute(&self, name: &str, arguments: &str) -> crate::Result<String> {
         self.dispatch(name, arguments).await
     }
@@ -412,5 +542,47 @@ mod tests {
         assert_eq!(params.cron, "0 9 * * MON");
         assert_eq!(params.action, "remind");
         assert!(params.description.is_none());
+    }
+
+    #[tokio::test]
+    async fn local_backend_schedule_and_list() {
+        let scheduler = Arc::new(LocalScheduler::new());
+        let tools = CronTools::local(Arc::clone(&scheduler));
+
+        let id = tools
+            .schedule("0 9 * * MON", "remind", serde_json::json!({"msg": "hi"}))
+            .await
+            .unwrap();
+
+        assert!(!id.is_empty());
+
+        let list = tools.list().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn local_backend_cancel_and_get() {
+        let scheduler = Arc::new(LocalScheduler::new());
+        let tools = CronTools::local(Arc::clone(&scheduler));
+
+        let id = tools
+            .schedule_with_options(ScheduleParams {
+                cron: "0 12 * * *".to_string(),
+                action: "check_in".to_string(),
+                payload: serde_json::json!({}),
+                description: Some("Daily check-in".to_string()),
+                timezone: None,
+            })
+            .await
+            .unwrap();
+
+        let info = tools.get(&id).await.unwrap();
+        assert_eq!(info.cron, "0 12 * * *");
+        assert_eq!(info.description.as_deref(), Some("Daily check-in"));
+
+        tools.cancel(&id).await.unwrap();
+        let list = tools.list().await.unwrap();
+        assert!(list.is_empty());
     }
 }

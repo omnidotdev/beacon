@@ -17,8 +17,10 @@ pub struct DiscoveredHook {
     /// Parsed manifest
     #[allow(dead_code)]
     pub manifest: HookManifest,
-    /// Events this hook subscribes to
+    /// Parsed event actions (for exact-match indexing)
     pub events: Vec<HookAction>,
+    /// Raw event patterns from HOOK.toml (supports wildcards like "message:*")
+    pub event_patterns: Vec<String>,
 }
 
 /// Load hooks from a directory
@@ -54,7 +56,7 @@ pub fn discover_hooks(hooks_dir: &Path) -> Vec<DiscoveredHook> {
             Ok(Some(hook)) => {
                 tracing::info!(
                     name = %hook.name,
-                    events = ?hook.events.iter().map(HookAction::as_str).collect::<Vec<_>>(),
+                    events = ?hook.event_patterns,
                     "discovered hook"
                 );
                 hooks.push(hook);
@@ -107,10 +109,18 @@ fn load_hook(dir: &Path) -> Result<Option<DiscoveredHook>, String> {
     // Find handler
     let handler_path = find_handler(dir)?;
 
-    // Parse events
-    let events: Vec<_> = manifest
+    // Collect raw event patterns (for wildcard matching) and parsed actions
+    let event_patterns: Vec<String> = manifest
         .events
         .iter()
+        .filter(|e| !e.is_empty())
+        .cloned()
+        .collect();
+
+    // Parse non-wildcard events into HookAction for exact-match indexing
+    let events: Vec<_> = event_patterns
+        .iter()
+        .filter(|e| !e.contains('*'))
         .filter_map(|e| {
             let action = HookAction::from_str(e);
             if action.is_none() {
@@ -124,7 +134,7 @@ fn load_hook(dir: &Path) -> Result<Option<DiscoveredHook>, String> {
         })
         .collect();
 
-    if events.is_empty() {
+    if event_patterns.is_empty() {
         tracing::warn!(hook = %manifest.name, "no valid events, skipping");
         return Ok(None);
     }
@@ -135,6 +145,7 @@ fn load_hook(dir: &Path) -> Result<Option<DiscoveredHook>, String> {
         handler_path,
         manifest,
         events,
+        event_patterns,
     }))
 }
 

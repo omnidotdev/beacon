@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Hook event actions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HookAction {
     /// After pairing check, before user lookup
     MessageReceived,
@@ -20,6 +20,8 @@ pub enum HookAction {
     ChannelConnected,
     /// When a channel disconnects
     ChannelDisconnected,
+    /// Custom/arbitrary event
+    Custom(String),
 }
 
 impl HookAction {
@@ -35,13 +37,15 @@ impl HookAction {
             "session:ended" => Some(Self::SessionEnded),
             "channel:connected" => Some(Self::ChannelConnected),
             "channel:disconnected" => Some(Self::ChannelDisconnected),
+            other if !other.is_empty() => Some(Self::Custom(other.to_string())),
             _ => None,
         }
     }
 
     /// Convert to string representation
     #[must_use]
-    pub const fn as_str(&self) -> &'static str {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn as_str(&self) -> &str {
         match self {
             Self::MessageReceived => "message:received",
             Self::BeforeAgent => "message:before_agent",
@@ -50,6 +54,7 @@ impl HookAction {
             Self::SessionEnded => "session:ended",
             Self::ChannelConnected => "channel:connected",
             Self::ChannelDisconnected => "channel:disconnected",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -88,6 +93,7 @@ pub struct HookEvent {
 impl HookEvent {
     /// Create a new hook event
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(action: HookAction, channel: &str, msg: &crate::channels::IncomingMessage) -> Self {
         Self {
             action: action.as_str().to_string(),
@@ -106,6 +112,7 @@ impl HookEvent {
 
     /// Create a lifecycle event for channel connect/disconnect (no message required)
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn channel_lifecycle(action: HookAction, channel_name: &str) -> Self {
         Self {
             action: action.as_str().to_string(),
@@ -305,5 +312,21 @@ mod tests {
         assert!(event.message_id.is_empty());
         assert!(event.sender_id.is_empty());
         assert!(event.session_id.is_none());
+    }
+
+    #[test]
+    fn custom_action_from_str() {
+        let action = HookAction::from_str("custom:my_event");
+        assert_eq!(
+            action,
+            Some(HookAction::Custom("custom:my_event".to_string()))
+        );
+    }
+
+    #[test]
+    fn custom_action_roundtrip() {
+        let input = "custom:my_event";
+        let action = HookAction::from_str(input).unwrap();
+        assert_eq!(action.as_str(), input);
     }
 }

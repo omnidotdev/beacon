@@ -34,11 +34,28 @@ const fn default_true() -> bool {
     true
 }
 
+/// Check whether an event string matches a pattern
+///
+/// Supports exact matching, glob-style `*` (match all), and
+/// namespace wildcards like `"message:*"`.
+fn event_matches_pattern(event: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if pattern.ends_with(":*") {
+        let prefix = &pattern[..pattern.len() - 1]; // e.g. "message:"
+        return event.starts_with(prefix);
+    }
+    event == pattern
+}
+
 /// Hook manager
 pub struct HookManager {
     enabled: bool,
     auto_reply: auto_reply::AutoReplyHandler,
     external_hooks: HashMap<HookAction, Vec<Arc<DiscoveredHook>>>,
+    /// Hooks with wildcard event patterns (cannot be indexed by exact action)
+    wildcard_hooks: Vec<Arc<DiscoveredHook>>,
 }
 
 impl HookManager {
@@ -51,6 +68,7 @@ impl HookManager {
                 enabled: false,
                 auto_reply: auto_reply::AutoReplyHandler::new(&[]),
                 external_hooks: HashMap::new(),
+                wildcard_hooks: Vec::new(),
             };
         }
 
@@ -65,19 +83,29 @@ impl HookManager {
 
         let discovered = loader::discover_hooks(&hooks_dir);
 
-        // Index hooks by event
+        // Index hooks by event; hooks with wildcard patterns go into a separate list
         let mut external_hooks: HashMap<HookAction, Vec<Arc<DiscoveredHook>>> = HashMap::new();
+        let mut wildcard_hooks: Vec<Arc<DiscoveredHook>> = Vec::new();
+
         for hook in discovered {
             let hook = Arc::new(hook);
+            let has_wildcard = hook.event_patterns.iter().any(|p| p.contains('*'));
+
+            if has_wildcard {
+                wildcard_hooks.push(Arc::clone(&hook));
+            }
+
+            // Also index exact-match events for fast lookup
             for event in &hook.events {
                 external_hooks
-                    .entry(*event)
+                    .entry(event.clone())
                     .or_default()
                     .push(Arc::clone(&hook));
             }
         }
 
-        let total_external: usize = external_hooks.values().map(Vec::len).sum();
+        let total_external: usize =
+            external_hooks.values().map(Vec::len).sum::<usize>() + wildcard_hooks.len();
         tracing::info!(
             auto_reply_rules = config.auto_reply.len(),
             external_hooks = total_external,
@@ -88,6 +116,7 @@ impl HookManager {
             enabled: true,
             auto_reply,
             external_hooks,
+            wildcard_hooks,
         }
     }
 
@@ -117,39 +146,73 @@ impl HookManager {
             }
         }
 
-        // Run external hooks
-        let Some(action) = HookAction::from_str(&event.action) else {
-            return result;
-        };
+        // Run external hooks — collect from exact-match index and wildcard list
+        let action = HookAction::from_str(&event.action);
 
-        if let Some(hooks) = self.external_hooks.get(&action) {
+        // Deduplicate: track which hooks we have already executed (by name)
+        let mut executed = std::collections::HashSet::new();
+
+        // Exact-match hooks
+        if let Some(action) = &action
+            && let Some(hooks) = self.external_hooks.get(action)
+        {
             for hook in hooks {
-                match executor::execute_hook(&hook.handler_path, event, None).await {
-                    Ok(hook_result) => {
-                        tracing::debug!(
-                            hook = %hook.name,
-                            action = %event.action,
-                            "hook executed"
-                        );
-                        result.merge(hook_result);
-
-                        if result.skip_processing {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            hook = %hook.name,
-                            error = %e,
-                            "hook execution failed"
-                        );
-                        // Continue with other hooks
-                    }
+                executed.insert(hook.name.clone());
+                if let Some(early) = Self::run_hook(hook, event, &mut result).await {
+                    return early;
                 }
             }
         }
 
+        // Wildcard hooks
+        for hook in &self.wildcard_hooks {
+            if executed.contains(&hook.name) {
+                continue;
+            }
+            let matches = hook
+                .event_patterns
+                .iter()
+                .any(|p| event_matches_pattern(&event.action, p));
+            if !matches {
+                continue;
+            }
+            executed.insert(hook.name.clone());
+            if let Some(early) = Self::run_hook(hook, event, &mut result).await {
+                return early;
+            }
+        }
+
         result
+    }
+
+    /// Execute a single hook, merging results. Returns `Some(result)` for early exit
+    async fn run_hook(
+        hook: &DiscoveredHook,
+        event: &HookEvent,
+        result: &mut HookResult,
+    ) -> Option<HookResult> {
+        match executor::execute_hook(&hook.handler_path, event, None).await {
+            Ok(hook_result) => {
+                tracing::debug!(
+                    hook = %hook.name,
+                    action = %event.action,
+                    "hook executed"
+                );
+                result.merge(hook_result);
+                if result.skip_processing {
+                    return Some(result.clone());
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    hook = %hook.name,
+                    error = %e,
+                    "hook execution failed"
+                );
+                // Continue with other hooks
+            }
+        }
+        None
     }
 
     /// Check if hooks are enabled
@@ -198,6 +261,47 @@ mod tests {
 
         let result = manager.trigger(&event).await;
         assert!(result.reply.is_none());
+    }
+
+    #[test]
+    fn wildcard_matches_message_events() {
+        assert!(super::event_matches_pattern(
+            "message:received",
+            "message:*"
+        ));
+        assert!(super::event_matches_pattern(
+            "message:before_agent",
+            "message:*"
+        ));
+        assert!(super::event_matches_pattern(
+            "message:after_agent",
+            "message:*"
+        ));
+    }
+
+    #[test]
+    fn wildcard_star_matches_all() {
+        assert!(super::event_matches_pattern("message:received", "*"));
+        assert!(super::event_matches_pattern("session:created", "*"));
+        assert!(super::event_matches_pattern("custom:anything", "*"));
+    }
+
+    #[test]
+    fn exact_match_works() {
+        assert!(super::event_matches_pattern(
+            "session:created",
+            "session:created"
+        ));
+        assert!(!super::event_matches_pattern(
+            "session:ended",
+            "session:created"
+        ));
+    }
+
+    #[test]
+    fn wildcard_no_partial() {
+        // "message:*" must NOT match "messagefoo" (no colon separator)
+        assert!(!super::event_matches_pattern("messagefoo", "message:*"));
     }
 
     #[tokio::test]

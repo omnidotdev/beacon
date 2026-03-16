@@ -83,6 +83,7 @@ sqlite-vec = "0.1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+croner = "2"
 
 # Cryptography (device identity)
 ed25519-dalek = { version = "2", features = ["rand_core"] }

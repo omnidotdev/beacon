@@ -34,6 +34,7 @@ pub mod canvas;
 pub mod channels;
 pub mod config;
 pub mod context;
+pub mod cron;
 pub mod daemon;
 pub mod db;
 pub mod discovery;

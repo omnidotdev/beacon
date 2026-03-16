@@ -7,6 +7,7 @@ mod auth;
 pub mod browser;
 pub mod canvas;
 pub mod health;
+pub mod hooks;
 pub mod jwt;
 pub mod knowledge;
 pub mod life_json;
@@ -733,6 +734,7 @@ impl ApiServer {
                 personas::router(self.state.clone()),
             )
             .nest("/api/voice", voice::router(self.state.clone()))
+            .nest("/api/hooks", hooks::router(self.state.clone()))
             .nest("/api/webhooks", webhooks::router(self.state.clone()))
             .nest("/api/browser", browser::router(self.state.browser.clone()))
             .nest(

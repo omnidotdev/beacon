@@ -131,8 +131,8 @@ impl Daemon {
         // Initialize Iggy event publisher (best-effort; failures do not block startup)
         crate::events::init_publisher(crate::events::EventsConfig::from_env());
 
-        // Initialize cron tools when Vortex is configured
-        let cron_tools: Option<Arc<crate::tools::BuiltinCronTools>> = if let Some(ref vortex_url) =
+        // Initialize cron tools (Vortex if configured, otherwise local scheduler)
+        let cron_tools: Arc<crate::tools::BuiltinCronTools> = if let Some(ref vortex_url) =
             self.config.api_server.vortex_url
         {
             tracing::info!(url = %vortex_url, "Vortex scheduling integration available");
@@ -147,12 +147,20 @@ impl Daemon {
                 },
                 |url| format!("{}/api/webhooks/vortex", url.trim_end_matches('/')),
             );
-            Some(Arc::new(crate::tools::BuiltinCronTools::new(
+            Arc::new(crate::tools::BuiltinCronTools::new(
                 crate::tools::CronTools::new(vortex_client, callback_url),
-            )))
+            ))
         } else {
-            None
+            tracing::info!("Vortex not configured, using local cron scheduler");
+            let scheduler = Arc::new(crate::cron::LocalScheduler::new());
+            scheduler.start(|job| {
+                tracing::info!(job_id = %job.id, schedule = %job.schedule, "local cron job fired");
+            });
+            Arc::new(crate::tools::BuiltinCronTools::new(
+                crate::tools::CronTools::local(scheduler),
+            ))
         };
+        let cron_tools = Some(cron_tools);
 
         // Initialize Synapse AI router client
         let (synapse, model_info) = Box::pin(self.init_synapse()).await;

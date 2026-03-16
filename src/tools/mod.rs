@@ -17,7 +17,7 @@ pub use browser::{
     BrowserController, BrowserControllerConfig, BrowserError, ElementInfo, PageContent, Screenshot,
 };
 pub use browser_tools::BuiltinBrowserTools;
-pub use cron::{BuiltinCronTools, CronTools, ScheduleInfo, ScheduleParams};
+pub use cron::{BuiltinCronTools, CronBackend, CronTools, ScheduleInfo, ScheduleParams};
 pub use exec::BuiltinExecTool;
 pub use memory::BuiltinMemoryTools;
 pub use sandbox::SandboxConfig;
