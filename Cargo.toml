@@ -137,6 +137,9 @@ agent-core = { git = "https://github.com/omnidotdev/agent-core.git", features = 
 # WASM plugin runtime
 extism = { version = "1", optional = true }
 
+# PDF text extraction
+pdf-extract = "0.8"
+
 # HTML parsing and URL handling
 url = "2"
 lru = "0.16.3"

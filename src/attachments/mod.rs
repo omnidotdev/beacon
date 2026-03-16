@@ -2,6 +2,7 @@
 //!
 //! Processes images, audio, and other attachments to augment message context
 
+mod pdf;
 mod video;
 mod vision;
 
@@ -78,7 +79,7 @@ impl AttachmentProcessor {
             AttachmentKind::Image => self.process_image(attachment).await,
             AttachmentKind::Audio => self.process_audio(attachment).await,
             AttachmentKind::Video => self.process_video(attachment).await,
-            AttachmentKind::File => self.process_file(attachment),
+            AttachmentKind::File => self.process_file(attachment).await,
         }
     }
 
@@ -228,14 +229,29 @@ impl AttachmentProcessor {
         format!("[Video: {filename}]\n{}", descriptions.join("\n"))
     }
 
-    /// Process a generic file attachment
-    #[allow(clippy::unused_self)]
-    fn process_file(&self, attachment: &Attachment) -> String {
-        format!(
-            "[File: {} ({})]",
-            attachment.filename.as_deref().unwrap_or("file"),
-            attachment.mime_type
-        )
+    /// Process a generic file attachment, extracting text from PDFs
+    async fn process_file(&self, attachment: &Attachment) -> String {
+        let filename = attachment.filename.as_deref().unwrap_or("file");
+
+        if pdf::is_pdf_attachment(&attachment.mime_type) {
+            let data = match self.get_attachment_data(attachment).await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to download PDF");
+                    return format!("[PDF: {filename} (could not download)]");
+                }
+            };
+
+            match pdf::extract_pdf_text(&data) {
+                Ok(text) => format!("[PDF: {filename}]\n{text}"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "PDF text extraction failed");
+                    format!("[PDF: {filename} (extraction failed)]")
+                }
+            }
+        } else {
+            format!("[File: {filename} ({})]", attachment.mime_type)
+        }
     }
 
     /// Get attachment data from URL or inline data
