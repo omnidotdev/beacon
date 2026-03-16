@@ -12,6 +12,7 @@ mod signal;
 mod slack;
 mod teams;
 mod telegram;
+pub mod twilio;
 mod whatsapp;
 
 use async_trait::async_trait;
@@ -29,6 +30,7 @@ pub use telegram::{
     BotCommand, MediaFileRef, TelegramAccount, TelegramAccountRegistry, TelegramChannel,
     TelegramRateLimiter, UpdateDedup, extract_update_media_refs, should_skip_group_message,
 };
+pub use twilio::TwilioChannel;
 pub use whatsapp::{WhatsAppChannel, WhatsAppWebhook};
 
 use crate::Result;

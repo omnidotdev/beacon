@@ -95,6 +95,9 @@ pub struct Config {
     /// Gmail channel configuration
     pub gmail: Option<crate::channels::gmail::GmailConfig>,
 
+    /// Twilio SMS channel configuration
+    pub twilio: Option<crate::channels::twilio::TwilioConfig>,
+
     /// Telegram-specific configuration (populated when token is present)
     pub telegram: Option<TelegramConfig>,
 
@@ -1018,6 +1021,36 @@ impl Config {
             }
         };
 
+        // Twilio config (env > toml > None) — only Some if account_sid AND auth_token AND phone_number are set
+        let twilio = {
+            let twilio_toml = &fc.channels.twilio;
+            let account_sid = std::env::var("TWILIO_ACCOUNT_SID")
+                .ok()
+                .or_else(|| twilio_toml.account_sid.clone());
+            let auth_token = std::env::var("TWILIO_AUTH_TOKEN")
+                .ok()
+                .or_else(|| twilio_toml.auth_token.clone());
+            let phone_number = std::env::var("TWILIO_PHONE_NUMBER")
+                .ok()
+                .or_else(|| twilio_toml.phone_number.clone());
+            match (account_sid, auth_token, phone_number) {
+                (Some(sid), Some(token), Some(phone)) => {
+                    let webhook_port = std::env::var("TWILIO_WEBHOOK_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .or(twilio_toml.webhook_port)
+                        .unwrap_or(8090);
+                    Some(crate::channels::twilio::TwilioConfig {
+                        account_sid: sid,
+                        auth_token: token,
+                        phone_number: phone,
+                        webhook_port,
+                    })
+                }
+                _ => None,
+            }
+        };
+
         // Telegram-specific config (assembled from token + env vars)
         let telegram = api_keys.telegram.as_ref().map(|token| {
             let mut tg = TelegramConfig::new(token.clone());
@@ -1125,6 +1158,7 @@ impl Config {
             skills,
             irc,
             gmail,
+            twilio,
             telegram,
             gatekeeper_url,
             gatekeeper_service_key,

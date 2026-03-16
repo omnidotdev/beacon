@@ -167,6 +167,9 @@ pub struct ChannelsFileConfig {
 
     #[serde(default)]
     pub gmail: GmailFileConfig,
+
+    #[serde(default)]
+    pub twilio: TwilioFileConfig,
 }
 
 /// Simple channel toggle (token lives in `api_keys`)
@@ -203,6 +206,19 @@ pub struct IrcFileConfig {
     pub use_tls: Option<bool>,
     /// Server password
     pub password: Option<String>,
+}
+
+/// Twilio channel configuration
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct TwilioFileConfig {
+    /// Twilio Account SID
+    pub account_sid: Option<String>,
+    /// Twilio Auth Token
+    pub auth_token: Option<String>,
+    /// Phone number (E.164 format)
+    pub phone_number: Option<String>,
+    /// Webhook server port for inbound SMS
+    pub webhook_port: Option<u16>,
 }
 
 /// iMessage-specific channel config
