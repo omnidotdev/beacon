@@ -63,6 +63,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Config
 directories = "6"
 dialoguer = "0.11"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 
 # Rate limiting
 governor = "0.8"

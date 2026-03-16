@@ -739,6 +739,51 @@ impl Daemon {
         let _api_handle = api_server.spawn();
         tracing::info!(port = self.config.api_server.port, "API server started");
 
+        // Spawn config file watcher for hot-reload
+        let _config_watcher = crate::config::file::config_file_path().and_then(|config_path| {
+            let initial_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+            match crate::config::watcher::watch_config(&config_path) {
+                Ok((watcher, mut reload_rx)) => {
+                    tokio::spawn(async move {
+                        let mut last_content = initial_content;
+                        while let Some(signal) = reload_rx.recv().await {
+                            let new_content =
+                                std::fs::read_to_string(&signal.path).unwrap_or_default();
+                            let diff = crate::config::reload::classify_changes(
+                                &last_content,
+                                &new_content,
+                            );
+
+                            if diff.has_hot_changes() {
+                                tracing::info!(
+                                    persona = diff.persona,
+                                    skills = diff.skills,
+                                    hooks = diff.hooks,
+                                    tool_policy = diff.tool_policy,
+                                    memory = diff.memory,
+                                    "config hot-reload: changes detected"
+                                );
+                            }
+
+                            if diff.requires_restart {
+                                tracing::warn!(
+                                    "config change requires restart to take full effect"
+                                );
+                            }
+
+                            last_content = new_content;
+                        }
+                    });
+                    Some(watcher)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start config watcher");
+                    None
+                }
+            }
+        });
+
         // Start channel handlers (only if synapse is configured)
         if let Some(ref synapse) = synapse {
             self.start_channels(

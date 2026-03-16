@@ -2,8 +2,10 @@
 
 pub mod cli;
 pub mod file;
+pub mod reload;
 #[cfg(feature = "embedded-synapse")]
 pub mod synapse_bridge;
+pub mod watcher;
 
 use std::path::PathBuf;
 
