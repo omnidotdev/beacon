@@ -27,3 +27,11 @@ Lighting the beacon
 - Gmail/email channel adapter with OAuth2 service account auth and polling
 - Extended hook lifecycle events: `session:created`, `session:ended`, `channel:connected`, `channel:disconnected`
 - PDF text extraction for message attachments via pdf-extract
+- Twilio SMS/voice channel adapter for phone calling
+- Feishu (Lark) channel adapter for enterprise messaging
+- Line messaging channel adapter for APAC coverage
+- Rule-based message routing and gating system with channel/sender/content filtering
+- Local in-process cron scheduler via croner (fallback when Vortex unavailable)
+- Extensible hook events with custom namespaces, wildcard matching, and `POST /api/hooks/emit` endpoint
+- Multi-provider vision processing with ordered fallback (Synapse, OpenAI, Gemini)
+- Multi-provider STT with ordered fallback (Synapse, Whisper, Deepgram)
