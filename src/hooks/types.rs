@@ -12,6 +12,14 @@ pub enum HookAction {
     BeforeAgent,
     /// After agent response, before send
     AfterAgent,
+    /// When a new session is created
+    SessionCreated,
+    /// When a session ends
+    SessionEnded,
+    /// When a channel successfully connects
+    ChannelConnected,
+    /// When a channel disconnects
+    ChannelDisconnected,
 }
 
 impl HookAction {
@@ -23,6 +31,10 @@ impl HookAction {
             "message:received" | "message" => Some(Self::MessageReceived),
             "message:before_agent" => Some(Self::BeforeAgent),
             "message:after_agent" => Some(Self::AfterAgent),
+            "session:created" => Some(Self::SessionCreated),
+            "session:ended" => Some(Self::SessionEnded),
+            "channel:connected" => Some(Self::ChannelConnected),
+            "channel:disconnected" => Some(Self::ChannelDisconnected),
             _ => None,
         }
     }
@@ -34,6 +46,10 @@ impl HookAction {
             Self::MessageReceived => "message:received",
             Self::BeforeAgent => "message:before_agent",
             Self::AfterAgent => "message:after_agent",
+            Self::SessionCreated => "session:created",
+            Self::SessionEnded => "session:ended",
+            Self::ChannelConnected => "channel:connected",
+            Self::ChannelDisconnected => "channel:disconnected",
         }
     }
 }
@@ -82,6 +98,24 @@ impl HookEvent {
             sender_name: msg.sender_name.clone(),
             content: msg.content.clone(),
             thread_id: msg.reply_to.clone(),
+            session_id: None,
+            response: None,
+            context: HashMap::new(),
+        }
+    }
+
+    /// Create a lifecycle event for channel connect/disconnect (no message required)
+    #[must_use]
+    pub fn channel_lifecycle(action: HookAction, channel_name: &str) -> Self {
+        Self {
+            action: action.as_str().to_string(),
+            channel: channel_name.to_string(),
+            channel_id: String::new(),
+            message_id: String::new(),
+            sender_id: String::new(),
+            sender_name: String::new(),
+            content: String::new(),
+            thread_id: None,
             session_id: None,
             response: None,
             context: HashMap::new(),
@@ -217,5 +251,59 @@ impl HookRequirements {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_session_created_action() {
+        let action = HookAction::from_str("session:created");
+        assert!(matches!(action, Some(HookAction::SessionCreated)));
+    }
+
+    #[test]
+    fn parse_session_ended_action() {
+        let action = HookAction::from_str("session:ended");
+        assert!(matches!(action, Some(HookAction::SessionEnded)));
+    }
+
+    #[test]
+    fn parse_channel_connected_action() {
+        let action = HookAction::from_str("channel:connected");
+        assert!(matches!(action, Some(HookAction::ChannelConnected)));
+    }
+
+    #[test]
+    fn parse_channel_disconnected_action() {
+        let action = HookAction::from_str("channel:disconnected");
+        assert!(matches!(action, Some(HookAction::ChannelDisconnected)));
+    }
+
+    #[test]
+    fn lifecycle_actions_roundtrip() {
+        for (s, expected) in [
+            ("session:created", HookAction::SessionCreated),
+            ("session:ended", HookAction::SessionEnded),
+            ("channel:connected", HookAction::ChannelConnected),
+            ("channel:disconnected", HookAction::ChannelDisconnected),
+        ] {
+            let parsed = HookAction::from_str(s).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), s);
+        }
+    }
+
+    #[test]
+    fn channel_lifecycle_event_fields() {
+        let event = HookEvent::channel_lifecycle(HookAction::ChannelConnected, "discord");
+        assert_eq!(event.action, "channel:connected");
+        assert_eq!(event.channel, "discord");
+        assert!(event.channel_id.is_empty());
+        assert!(event.message_id.is_empty());
+        assert!(event.sender_id.is_empty());
+        assert!(event.session_id.is_none());
     }
 }

@@ -863,6 +863,10 @@ impl Daemon {
             if let Err(e) = discord.connect().await {
                 tracing::error!(error = %e, "Discord connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "discord");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -916,6 +920,10 @@ impl Daemon {
             if let Err(e) = slack.connect().await {
                 tracing::error!(error = %e, "Slack connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "slack");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -973,6 +981,10 @@ impl Daemon {
             if let Err(e) = whatsapp.connect().await {
                 tracing::error!(error = %e, "WhatsApp connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "whatsapp");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1029,6 +1041,10 @@ impl Daemon {
             if let Err(e) = signal.connect().await {
                 tracing::error!(error = %e, "Signal connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "signal");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 // Spawn polling loop to fetch incoming messages
                 drop(signal.start_polling(std::time::Duration::from_secs(5)));
 
@@ -1086,6 +1102,9 @@ impl Daemon {
             if let Err(e) = irc_channel.connect().await {
                 tracing::error!(error = %e, "IRC connect failed");
             } else {
+                let hook_event = HookEvent::channel_lifecycle(HookAction::ChannelConnected, "irc");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1140,6 +1159,10 @@ impl Daemon {
             if let Err(e) = gmail_channel.connect().await {
                 tracing::error!(error = %e, "Gmail connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "gmail");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1199,6 +1222,10 @@ impl Daemon {
             if let Err(e) = imessage.connect().await {
                 tracing::error!(error = %e, "iMessage connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "imessage");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1260,6 +1287,10 @@ impl Daemon {
             if let Err(e) = matrix.connect().await {
                 tracing::error!(error = %e, "Matrix connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "matrix");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1323,6 +1354,10 @@ impl Daemon {
             if let Err(e) = teams.connect().await {
                 tracing::error!(error = %e, "Teams connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "teams");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1377,6 +1412,10 @@ impl Daemon {
             if let Err(e) = google_chat.connect().await {
                 tracing::error!(error = %e, "Google Chat connect failed");
             } else {
+                let hook_event =
+                    HookEvent::channel_lifecycle(HookAction::ChannelConnected, "google_chat");
+                let _ = hook_manager.trigger(&hook_event).await;
+
                 let synapse = Arc::clone(&synapse);
                 let model_id = model_id.clone();
                 let system_prompt = system_prompt.clone();
@@ -1426,6 +1465,9 @@ impl Daemon {
         // Telegram (polling mode — only when no public URL for webhooks)
         if let (Some(tg), Some(rx)) = (telegram, telegram_polling_rx) {
             drop(tg.start_polling(std::time::Duration::from_secs(1)));
+
+            let hook_event = HookEvent::channel_lifecycle(HookAction::ChannelConnected, "telegram");
+            let _ = hook_manager.trigger(&hook_event).await;
 
             let synapse = Arc::clone(&synapse);
             let model_id = model_id.clone();
@@ -1900,6 +1942,11 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                     channel_name,
                     &msg.sender_id,
                 ));
+
+                // Hook: session:created
+                let hook_event = HookEvent::new(HookAction::SessionCreated, channel_name, &msg)
+                    .with_session(&session.id);
+                let _ = hook_manager.trigger(&hook_event).await;
             }
             Ok(_) => {} // existing session, don't re-publish started
             Err(e) => {
