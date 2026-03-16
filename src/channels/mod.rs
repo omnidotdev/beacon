@@ -5,6 +5,7 @@
 mod discord;
 mod google_chat;
 mod imessage;
+pub mod irc;
 mod matrix;
 mod signal;
 mod slack;
@@ -14,6 +15,7 @@ mod whatsapp;
 
 use async_trait::async_trait;
 
+pub use self::irc::IrcChannel;
 pub use discord::DiscordChannel;
 pub use google_chat::{GoogleChatChannel, GoogleChatEvent};
 pub use imessage::{IMessageChannel, IMessageChat, IMessageMessage};

@@ -107,6 +107,9 @@ urlencoding = "2"
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
 
+# IRC
+irc = "1"
+
 # Browser automation (CDP)
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 

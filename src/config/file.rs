@@ -161,12 +161,32 @@ pub struct ChannelsFileConfig {
 
     #[serde(default)]
     pub imessage: Option<IMessageFileConfig>,
+
+    #[serde(default)]
+    pub irc: IrcFileConfig,
 }
 
 /// Simple channel toggle (token lives in `api_keys`)
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ChannelToggle {
     pub enabled: Option<bool>,
+}
+
+/// IRC channel configuration
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct IrcFileConfig {
+    /// IRC server hostname
+    pub server: Option<String>,
+    /// IRC server port
+    pub port: Option<u16>,
+    /// Bot nickname
+    pub nickname: Option<String>,
+    /// Channels to join
+    pub channels: Option<Vec<String>>,
+    /// Use TLS
+    pub use_tls: Option<bool>,
+    /// Server password
+    pub password: Option<String>,
 }
 
 /// iMessage-specific channel config

@@ -89,6 +89,9 @@ pub struct Config {
     /// Skills system configuration
     pub skills: SkillsConfig,
 
+    /// IRC channel configuration
+    pub irc: Option<crate::channels::irc::IrcConfig>,
+
     /// Telegram-specific configuration (populated when token is present)
     pub telegram: Option<TelegramConfig>,
 
@@ -938,6 +941,48 @@ impl Config {
             }
         };
 
+        // IRC config (env > toml > None) — only Some if server AND nickname are set
+        let irc = {
+            let irc_toml = &fc.channels.irc;
+            let server = std::env::var("IRC_SERVER")
+                .ok()
+                .or_else(|| irc_toml.server.clone());
+            let nickname = std::env::var("IRC_NICKNAME")
+                .ok()
+                .or_else(|| irc_toml.nickname.clone());
+            match (server, nickname) {
+                (Some(server), Some(nickname)) => {
+                    let port = std::env::var("IRC_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .or(irc_toml.port)
+                        .unwrap_or(6697);
+                    let use_tls = std::env::var("IRC_USE_TLS")
+                        .ok()
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .or(irc_toml.use_tls)
+                        .unwrap_or(true);
+                    let channels = std::env::var("IRC_CHANNELS")
+                        .ok()
+                        .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
+                        .or_else(|| irc_toml.channels.clone())
+                        .unwrap_or_default();
+                    let password = std::env::var("IRC_PASSWORD")
+                        .ok()
+                        .or_else(|| irc_toml.password.clone());
+                    Some(crate::channels::irc::IrcConfig {
+                        server,
+                        port,
+                        nickname,
+                        channels,
+                        use_tls,
+                        password,
+                    })
+                }
+                _ => None,
+            }
+        };
+
         // Telegram-specific config (assembled from token + env vars)
         let telegram = api_keys.telegram.as_ref().map(|token| {
             let mut tg = TelegramConfig::new(token.clone());
@@ -1043,6 +1088,7 @@ impl Config {
             knowledge_cache_dir,
             sync,
             skills,
+            irc,
             telegram,
             gatekeeper_url,
             gatekeeper_service_key,
