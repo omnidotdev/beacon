@@ -4,6 +4,8 @@
 
 mod config;
 pub mod providers;
+pub mod stt_provider;
+pub mod vision_provider;
 
 pub use config::MediaConfig;
 

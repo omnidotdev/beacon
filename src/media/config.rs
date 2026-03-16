@@ -14,6 +14,10 @@ pub struct MediaConfig {
     pub openai: OpenAIMediaConfig,
     /// Whisper transcription configuration
     pub whisper: WhisperConfig,
+    /// Vision provider routing configuration
+    pub vision: VisionRouterConfig,
+    /// STT provider routing configuration
+    pub stt: SttRouterConfig,
 }
 
 impl Default for MediaConfig {
@@ -23,6 +27,8 @@ impl Default for MediaConfig {
             max_file_size: 10 * 1024 * 1024, // 10MB
             openai: OpenAIMediaConfig::default(),
             whisper: WhisperConfig::default(),
+            vision: VisionRouterConfig::default(),
+            stt: SttRouterConfig::default(),
         }
     }
 }
@@ -72,4 +78,26 @@ impl Default for WhisperConfig {
             language: None,
         }
     }
+}
+
+/// Vision provider routing configuration
+///
+/// When `providers` is empty, falls back to existing behavior
+/// (Synapse if available, then direct API)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisionRouterConfig {
+    /// Ordered list of provider names to try (e.g. `["synapse", "openai", "gemini"]`)
+    pub providers: Vec<String>,
+}
+
+/// STT provider routing configuration
+///
+/// When `providers` is empty, falls back to existing behavior
+/// (Synapse if available, then Whisper)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SttRouterConfig {
+    /// Ordered list of provider names to try (e.g. `["synapse", "whisper", "deepgram"]`)
+    pub providers: Vec<String>,
 }
