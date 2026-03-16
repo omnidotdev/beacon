@@ -164,12 +164,28 @@ pub struct ChannelsFileConfig {
 
     #[serde(default)]
     pub irc: IrcFileConfig,
+
+    #[serde(default)]
+    pub gmail: GmailFileConfig,
 }
 
 /// Simple channel toggle (token lives in `api_keys`)
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ChannelToggle {
     pub enabled: Option<bool>,
+}
+
+/// Gmail channel configuration
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct GmailFileConfig {
+    /// Path to Google service account credentials JSON
+    pub credentials_path: Option<String>,
+    /// Seconds between polling for new messages
+    pub poll_interval_secs: Option<u64>,
+    /// Gmail labels to watch
+    pub labels: Option<Vec<String>>,
+    /// User email address to act as
+    pub user_email: Option<String>,
 }
 
 /// IRC channel configuration

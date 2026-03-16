@@ -110,6 +110,10 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 # IRC
 irc = "1"
 
+# Gmail
+google-gmail1 = "6"
+yup-oauth2 = "11"
+
 # Browser automation (CDP)
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 

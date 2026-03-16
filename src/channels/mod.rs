@@ -3,6 +3,7 @@
 //! Each channel implements the `Channel` trait to provide unified messaging.
 
 mod discord;
+pub mod gmail;
 mod google_chat;
 mod imessage;
 pub mod irc;
@@ -17,6 +18,7 @@ use async_trait::async_trait;
 
 pub use self::irc::IrcChannel;
 pub use discord::DiscordChannel;
+pub use gmail::GmailChannel;
 pub use google_chat::{GoogleChatChannel, GoogleChatEvent};
 pub use imessage::{IMessageChannel, IMessageChat, IMessageMessage};
 pub use matrix::MatrixChannel;

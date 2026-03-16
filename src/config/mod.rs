@@ -92,6 +92,9 @@ pub struct Config {
     /// IRC channel configuration
     pub irc: Option<crate::channels::irc::IrcConfig>,
 
+    /// Gmail channel configuration
+    pub gmail: Option<crate::channels::gmail::GmailConfig>,
+
     /// Telegram-specific configuration (populated when token is present)
     pub telegram: Option<TelegramConfig>,
 
@@ -983,6 +986,38 @@ impl Config {
             }
         };
 
+        // Gmail config (env > toml > None) — only Some if credentials_path AND user_email are set
+        let gmail = {
+            let gmail_toml = &fc.channels.gmail;
+            let credentials_path = std::env::var("GMAIL_CREDENTIALS_PATH")
+                .ok()
+                .or_else(|| gmail_toml.credentials_path.clone());
+            let user_email = std::env::var("GMAIL_USER_EMAIL")
+                .ok()
+                .or_else(|| gmail_toml.user_email.clone());
+            match (credentials_path, user_email) {
+                (Some(creds), Some(email)) => {
+                    let poll_interval_secs = std::env::var("GMAIL_POLL_INTERVAL_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .or(gmail_toml.poll_interval_secs)
+                        .unwrap_or(30);
+                    let labels = std::env::var("GMAIL_LABELS")
+                        .ok()
+                        .map(|s| s.split(',').map(|l| l.trim().to_string()).collect())
+                        .or_else(|| gmail_toml.labels.clone())
+                        .unwrap_or_else(|| vec!["INBOX".to_string()]);
+                    Some(crate::channels::gmail::GmailConfig {
+                        credentials_path: PathBuf::from(creds),
+                        poll_interval_secs,
+                        labels,
+                        user_email: email,
+                    })
+                }
+                _ => None,
+            }
+        };
+
         // Telegram-specific config (assembled from token + env vars)
         let telegram = api_keys.telegram.as_ref().map(|token| {
             let mut tg = TelegramConfig::new(token.clone());
@@ -1089,6 +1124,7 @@ impl Config {
             sync,
             skills,
             irc,
+            gmail,
             telegram,
             gatekeeper_url,
             gatekeeper_service_key,

@@ -1132,6 +1132,60 @@ impl Daemon {
             }
         }
 
+        // Gmail
+        if let Some(gmail_config) = &self.config.gmail {
+            let (mut gmail_channel, rx) =
+                crate::channels::GmailChannel::with_receiver(gmail_config.clone());
+
+            if let Err(e) = gmail_channel.connect().await {
+                tracing::error!(error = %e, "Gmail connect failed");
+            } else {
+                let synapse = Arc::clone(&synapse);
+                let model_id = model_id.clone();
+                let system_prompt = system_prompt.clone();
+                let session_repo = SessionRepo::new(self.db.clone());
+                let user_repo = UserRepo::new(self.db.clone());
+                let memory_repo = db::MemoryRepo::new(self.db.clone());
+                let persona_id = persona_id.clone();
+                let persona_system_prompt = persona_system_prompt.clone();
+                let policy = Arc::clone(&tool_policy);
+                let pairing = Arc::clone(&pairing_manager);
+                let attachments = Arc::clone(&attachment_processor);
+                let hooks = Arc::clone(&hook_manager);
+                let knowledge = knowledge_chunks.clone();
+                let pm = plugin_manager.clone();
+                let router = Arc::clone(&binding_router);
+                let registry = Arc::clone(&agent_registry);
+                tokio::spawn(async move {
+                    handle_channel_messages(
+                        "gmail",
+                        rx,
+                        synapse,
+                        model_id,
+                        system_prompt,
+                        max_tokens,
+                        gmail_channel,
+                        session_repo,
+                        user_repo,
+                        memory_repo,
+                        persona_id,
+                        persona_system_prompt,
+                        policy,
+                        pairing,
+                        attachments,
+                        hooks,
+                        knowledge,
+                        max_context_tokens,
+                        pm,
+                        None,
+                        router,
+                        registry,
+                    )
+                    .await;
+                });
+            }
+        }
+
         // iMessage (macOS only)
         #[cfg(target_os = "macos")]
         if self.config.imessage.enabled {
