@@ -377,6 +377,28 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
         });
     }
 
+    // Record message count to Aether (fire-and-forget, separate from token recording)
+    if let Some(billing) = &state.billing_state {
+        let client = billing.client.clone();
+        let entity_id = config.user_id.clone();
+        let idempotency_key = uuid::Uuid::new_v4().to_string();
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .record_usage(
+                    "user",
+                    &entity_id,
+                    "messages",
+                    1.0,
+                    &idempotency_key,
+                    std::collections::HashMap::new(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to record message count to Aether");
+            }
+        });
+    }
+
     // Record usage locally
     if let Some(ref usage_repo) = state.usage_repo
         && let Err(e) = usage_repo.record(

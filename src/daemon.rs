@@ -2287,6 +2287,14 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         if let Some(ac) = agent_config
             && let crate::agent::Execution::Harness(ref harness_config) = ac.execution
         {
+            // Ack reaction (👀)
+            if let Err(e) = channel
+                .add_reaction(&msg.channel_id, &msg.id, "\u{1F440}")
+                .await
+            {
+                tracing::debug!(error = %e, "harness ack reaction failed");
+            }
+
             let deps = crate::agent::harness::HarnessTurnDeps {
                 adapter_registry: &adapter_registry,
                 harness_session_repo: &harness_session_repo,
@@ -2320,9 +2328,23 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                     if let Err(e) = channel.send(outgoing).await {
                         tracing::error!(error = %e, "harness response send error");
                     }
+                    // Done reaction (✅)
+                    if let Err(e) = channel
+                        .add_reaction(&msg.channel_id, &msg.id, "\u{2705}")
+                        .await
+                    {
+                        tracing::debug!(error = %e, "harness done reaction failed");
+                    }
                 }
                 Err(e) => {
                     tracing::error!(error = %e, agent = %resolved_agent, "harness turn failed");
+                    // Error reaction (❌)
+                    if let Err(e) = channel
+                        .add_reaction(&msg.channel_id, &msg.id, "\u{274C}")
+                        .await
+                    {
+                        tracing::debug!(error = %e, "harness error reaction failed");
+                    }
                 }
             }
             continue;

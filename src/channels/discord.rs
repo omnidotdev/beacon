@@ -288,8 +288,14 @@ impl EventHandler for DiscordHandler {
         let is_dm = msg.guild_id.is_none();
         let is_mention = msg.mentions_me(&ctx).await.unwrap_or(false);
 
-        // Only respond to DMs or mentions
-        if !is_dm && !is_mention {
+        // Check if this is a reply to a bot message (thread continuation)
+        let is_reply_to_bot = msg
+            .referenced_message
+            .as_ref()
+            .is_some_and(|r| r.author.bot);
+
+        // Respond to DMs, mentions, or replies to bot messages (thread continuation)
+        if !is_dm && !is_mention && !is_reply_to_bot {
             return;
         }
 

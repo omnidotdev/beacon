@@ -196,6 +196,37 @@ async fn handle_socket(
         return;
     }
 
+    // Check conversations limit when billing is enabled
+    if let (Some(billing_state), Some(user_id)) =
+        (&state.billing_state, &gatekeeper_user_id)
+    {
+        match crate::billing::middleware::check_conversations_usage(
+            billing_state,
+            "user",
+            user_id,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let error = WsOutgoing::Error {
+                    code: "conversations_limit".to_string(),
+                    message: "Conversation limit reached for your plan".to_string(),
+                };
+                if let Ok(msg) = serde_json::to_string(&error) {
+                    let _ = sender.send(Message::Text(msg.into())).await;
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Aether unreachable for conversations check, allowing through"
+                );
+            }
+        }
+    }
+
     // Create channel for sending messages back to client
     let (tx, mut rx) = mpsc::channel::<WsOutgoing>(32);
 

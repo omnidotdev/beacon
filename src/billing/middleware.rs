@@ -14,7 +14,10 @@ use super::{BillingState, CachedEntitlement, CachedUsage, FailMode};
 use crate::api::jwt::JwksCache;
 
 const FEATURE_KEY_API_ACCESS: &str = "api_access";
+const FEATURE_KEY_VOICE_ENABLED: &str = "voice_enabled";
 const METER_KEY_REQUESTS: &str = "requests";
+const METER_KEY_MESSAGES: &str = "messages";
+const METER_KEY_CONVERSATIONS: &str = "conversations";
 
 /// Extract a Bearer token from the Authorization header
 fn extract_bearer(req: &Request) -> Option<String> {
@@ -91,6 +94,38 @@ pub async fn billing_middleware(
         }
     }
 
+    // Check messages usage limit → 429 if exceeded
+    match check_messages_usage(&billing, entity_type, entity_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "monthly message limit exceeded",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return handle_aether_error(&billing.fail_mode, e, request, next).await;
+        }
+    }
+
+    // Check voice entitlement for voice endpoints → 403 if denied
+    if path.starts_with("/api/voice/transcribe") || path.starts_with("/api/voice/synthesize") {
+        match check_voice_entitlement(&billing, entity_type, entity_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "voice features not available on your plan",
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return handle_aether_error(&billing.fail_mode, e, request, next).await;
+            }
+        }
+    }
+
     next.run(request).await
 }
 
@@ -151,6 +186,105 @@ async fn check_usage(
         entity_type,
         entity_id,
         METER_KEY_REQUESTS,
+        CachedUsage {
+            allowed: response.allowed,
+        },
+    );
+
+    Ok(response.allowed)
+}
+
+/// Check the `messages` usage meter, using cache when available
+async fn check_messages_usage(
+    state: &BillingState,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool, synapse_billing::BillingError> {
+    // Check cache first
+    if let Some(cached) = state
+        .cache
+        .get_usage(entity_type, entity_id, METER_KEY_MESSAGES)
+    {
+        return Ok(cached.allowed);
+    }
+
+    // Cache miss — call Aether
+    let response = state
+        .client
+        .check_usage(entity_type, entity_id, METER_KEY_MESSAGES, 1.0)
+        .await?;
+
+    state.cache.put_usage(
+        entity_type,
+        entity_id,
+        METER_KEY_MESSAGES,
+        CachedUsage {
+            allowed: response.allowed,
+        },
+    );
+
+    Ok(response.allowed)
+}
+
+/// Check the `voice_enabled` entitlement, using cache when available
+async fn check_voice_entitlement(
+    state: &BillingState,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool, synapse_billing::BillingError> {
+    // Check cache first
+    if let Some(cached) =
+        state
+            .cache
+            .get_entitlement(entity_type, entity_id, FEATURE_KEY_VOICE_ENABLED)
+    {
+        return Ok(cached.has_access);
+    }
+
+    // Cache miss — call Aether
+    let response = state
+        .client
+        .check_entitlement(entity_type, entity_id, FEATURE_KEY_VOICE_ENABLED)
+        .await?;
+
+    state.cache.put_entitlement(
+        entity_type,
+        entity_id,
+        FEATURE_KEY_VOICE_ENABLED,
+        CachedEntitlement {
+            has_access: response.has_access,
+        },
+    );
+
+    Ok(response.has_access)
+}
+
+/// Check the `conversations` usage meter, using cache when available.
+///
+/// Used by callers (e.g. WebSocket handler) to gate new conversation creation.
+pub async fn check_conversations_usage(
+    state: &BillingState,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool, synapse_billing::BillingError> {
+    // Check cache first
+    if let Some(cached) = state
+        .cache
+        .get_usage(entity_type, entity_id, METER_KEY_CONVERSATIONS)
+    {
+        return Ok(cached.allowed);
+    }
+
+    // Cache miss — call Aether
+    let response = state
+        .client
+        .check_usage(entity_type, entity_id, METER_KEY_CONVERSATIONS, 1.0)
+        .await?;
+
+    state.cache.put_usage(
+        entity_type,
+        entity_id,
+        METER_KEY_CONVERSATIONS,
         CachedUsage {
             allowed: response.allowed,
         },
