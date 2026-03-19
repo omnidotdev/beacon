@@ -97,9 +97,19 @@ impl HarnessAdapter for ClaudeCliAdapter {
             cmd.arg("--dangerously-skip-permissions");
         }
 
-        // MCP servers
-        for server in &config.mcp_servers {
-            cmd.arg("--mcp-server").arg(server);
+        // MCP server configs (JSON strings or file paths)
+        for mcp_config in &config.mcp_servers {
+            cmd.arg("--mcp-config").arg(mcp_config);
+        }
+
+        // Model override
+        if let Some(ref model) = config.model {
+            cmd.arg("--model").arg(model);
+        }
+
+        // System prompt
+        if let Some(ref system_prompt) = config.system_prompt {
+            cmd.arg("--system-prompt").arg(system_prompt);
         }
 
         // Environment variables

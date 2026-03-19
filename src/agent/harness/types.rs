@@ -26,12 +26,18 @@ pub struct HarnessConfig {
     /// Environment variables to inject into the harness process
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// MCP servers to expose to the harness
+    /// MCP server configs (JSON strings or file paths) passed via --mcp-config
     #[serde(default)]
     pub mcp_servers: Vec<String>,
     /// Whether to skip permission prompts (e.g. --dangerously-skip-permissions)
     #[serde(default)]
     pub skip_permissions: bool,
+    /// Optional system prompt injected into the harness
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Optional model override for the harness
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Session persistence mode for harness invocations
