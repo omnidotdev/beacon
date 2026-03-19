@@ -52,6 +52,10 @@ pub enum Error {
     #[error("agent error: {0}")]
     Agent(String),
 
+    /// Harness execution error
+    #[error("harness error: {0}")]
+    Harness(String),
+
     /// IO error
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -1292,6 +1292,10 @@ impl Config {
                         workspace_dir: agent_data_dir,
                         dm_policy_override: a.dm_policy_override.map(|s| DmPolicy::from_str(&s)),
                         enabled_channels: a.enabled_channels,
+                        execution: a.harness.map_or_else(
+                            crate::agent::Execution::default,
+                            crate::agent::Execution::Harness,
+                        ),
                     }
                 })
                 .collect(),

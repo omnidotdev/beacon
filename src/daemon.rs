@@ -199,6 +199,10 @@ impl Daemon {
             ))
         };
 
+        // Initialize harness adapter infrastructure
+        let adapter_registry = Arc::new(crate::agent::AdapterRegistry::new());
+        let harness_session_repo = crate::agent::HarnessSessionRepo::new(self.db.clone());
+
         // Build routing engine from config rules
         let routing_engine = Arc::new(crate::routing::RoutingEngine::new(
             self.config.routing_rules.clone(),
@@ -752,7 +756,8 @@ impl Daemon {
             .hook_manager(Arc::clone(&hook_manager))
             .pairing_manager(Arc::clone(&pairing_manager))
             .attachment_processor(Arc::clone(&attachment_processor))
-            .sandbox_config(self.config.sandbox.clone());
+            .sandbox_config(self.config.sandbox.clone())
+            .harness(Arc::clone(&adapter_registry), harness_session_repo.clone());
 
         let api_server = api_builder.build();
         let _api_handle = api_server.spawn();
@@ -821,6 +826,8 @@ impl Daemon {
                 Arc::clone(&binding_router),
                 Arc::clone(&agent_registry),
                 Arc::clone(&routing_engine),
+                Arc::clone(&adapter_registry),
+                harness_session_repo.clone(),
             )
             .await;
         } else {
@@ -872,6 +879,8 @@ impl Daemon {
         binding_router: Arc<crate::agent::BindingRouter>,
         agent_registry: Arc<crate::agent::AgentRegistry>,
         routing_engine: Arc<crate::routing::RoutingEngine>,
+        adapter_registry: Arc<crate::agent::AdapterRegistry>,
+        harness_session_repo: crate::agent::HarnessSessionRepo,
     ) {
         let persona_id = self.config.persona.id().to_string();
         let persona_system_prompt = self.config.persona.system_prompt().map(String::from);
@@ -905,6 +914,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "discord",
@@ -930,6 +941,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -964,6 +977,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "slack",
@@ -989,6 +1004,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1027,6 +1044,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "whatsapp",
@@ -1052,6 +1071,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1092,6 +1113,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "signal",
@@ -1117,6 +1140,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1151,6 +1176,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "irc",
@@ -1176,6 +1203,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1211,6 +1240,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "gmail",
@@ -1236,6 +1267,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1271,6 +1304,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "twilio",
@@ -1296,6 +1331,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1331,6 +1368,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "feishu",
@@ -1356,6 +1395,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1390,6 +1431,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "line",
@@ -1415,6 +1458,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1455,6 +1500,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "imessage",
@@ -1480,6 +1527,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1522,6 +1571,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "matrix",
@@ -1547,6 +1598,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1591,6 +1644,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "teams",
@@ -1616,6 +1671,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1651,6 +1708,8 @@ impl Daemon {
                 let router = Arc::clone(&binding_router);
                 let registry = Arc::clone(&agent_registry);
                 let routing = Arc::clone(&routing_engine);
+                let adapters = Arc::clone(&adapter_registry);
+                let harness_sessions = harness_session_repo.clone();
                 tokio::spawn(async move {
                     handle_channel_messages(
                         "google_chat",
@@ -1676,6 +1735,8 @@ impl Daemon {
                         router,
                         registry,
                         routing,
+                        adapters,
+                        harness_sessions,
                     )
                     .await;
                 });
@@ -1706,6 +1767,8 @@ impl Daemon {
             let router = Arc::clone(&binding_router);
             let registry = Arc::clone(&agent_registry);
             let routing = Arc::clone(&routing_engine);
+            let adapters = Arc::clone(&adapter_registry);
+            let harness_sessions = harness_session_repo.clone();
             let tg_config = self.config.telegram.clone();
             tokio::spawn(async move {
                 handle_channel_messages(
@@ -1732,6 +1795,8 @@ impl Daemon {
                     router,
                     registry,
                     routing,
+                    adapters,
+                    harness_sessions,
                 )
                 .await;
             });
@@ -2078,6 +2143,8 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
     binding_router: Arc<crate::agent::BindingRouter>,
     agent_registry: Arc<crate::agent::AgentRegistry>,
     routing_engine: Arc<crate::routing::RoutingEngine>,
+    adapter_registry: Arc<crate::agent::AdapterRegistry>,
+    harness_session_repo: crate::agent::HarnessSessionRepo,
 ) {
     let exec_tool = Arc::new(crate::tools::BuiltinExecTool::default());
     let browser_tools = Arc::new(crate::tools::BuiltinBrowserTools::new());
@@ -2214,6 +2281,51 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                     e
                 );
             }
+        }
+
+        // Check if the resolved agent uses harness execution
+        if let Some(ac) = agent_config
+            && let crate::agent::Execution::Harness(ref harness_config) = ac.execution
+        {
+            let deps = crate::agent::harness::HarnessTurnDeps {
+                adapter_registry: &adapter_registry,
+                harness_session_repo: &harness_session_repo,
+                session_repo: &session_repo,
+                usage_recorder: None,
+                usage_repo: None,
+            };
+            match crate::agent::harness::run_harness_turn(
+                &deps,
+                &resolved_agent,
+                harness_config,
+                &msg.content,
+                channel_name,
+                &msg.channel_id,
+                &session.id,
+                &user.id,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let outgoing = OutgoingMessage {
+                        channel_id: msg.channel_id.clone(),
+                        content: response,
+                        reply_to: Some(msg.id.clone()),
+                        thread_id: msg.reply_to.clone(),
+                        keyboard: None,
+                        media: vec![],
+                        edit_target: None,
+                        voice_note: false,
+                    };
+                    if let Err(e) = channel.send(outgoing).await {
+                        tracing::error!(error = %e, "harness response send error");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, agent = %resolved_agent, "harness turn failed");
+                }
+            }
+            continue;
         }
 
         // Extract thread_id for threading support

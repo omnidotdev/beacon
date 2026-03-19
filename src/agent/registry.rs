@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use crate::security::DmPolicy;
 
+use super::harness::Execution;
+
 /// Unique agent identifier, lowercase-normalized
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentId(pub String);
@@ -52,6 +54,8 @@ pub struct AgentConfig {
     pub dm_policy_override: Option<DmPolicy>,
     /// Channels this agent is enabled for (None = all)
     pub enabled_channels: Option<Vec<String>>,
+    /// Execution mode: built-in Synapse loop or external harness
+    pub execution: Execution,
 }
 
 /// Registry of all configured agents
@@ -87,6 +91,7 @@ impl AgentRegistry {
             workspace_dir: data_dir.join("agents").join("default"),
             dm_policy_override: None,
             enabled_channels: None,
+            execution: Execution::default(),
         };
 
         let mut agents = HashMap::new();
@@ -164,6 +169,7 @@ mod tests {
                 workspace_dir: PathBuf::from("/tmp/alpha"),
                 dm_policy_override: None,
                 enabled_channels: None,
+                execution: Execution::default(),
             },
             AgentConfig {
                 id: AgentId::new("beta"),
@@ -173,6 +179,7 @@ mod tests {
                 workspace_dir: PathBuf::from("/tmp/beta"),
                 dm_policy_override: None,
                 enabled_channels: Some(vec!["discord".to_string()]),
+                execution: Execution::default(),
             },
         ];
 

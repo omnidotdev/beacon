@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::Result;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 /// Initialize the database schema
 ///
@@ -76,6 +76,9 @@ pub fn init(conn: &Connection) -> Result<()> {
     }
     if version < 20 {
         migrate_v20(conn)?;
+    }
+    if version < 21 {
+        migrate_v21(conn)?;
     }
 
     Ok(())
@@ -655,6 +658,29 @@ fn migrate_v20(conn: &Connection) -> Result<()> {
     )?;
 
     tracing::info!("migrated to schema v20 (usage tracking)");
+    Ok(())
+}
+
+fn migrate_v21(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        CREATE TABLE IF NOT EXISTS harness_sessions (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            harness_session_id TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(agent_id, channel, channel_id)
+        );
+
+        PRAGMA user_version = 21;
+        ",
+    )?;
+
+    tracing::info!("migrated to schema v21 (harness sessions)");
     Ok(())
 }
 

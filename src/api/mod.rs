@@ -152,6 +152,10 @@ pub struct ApiState {
     pub sandbox_config: Option<crate::tools::SandboxConfig>,
     /// Local usage tracking repository
     pub usage_repo: Option<crate::db::UsageRepo>,
+    /// Harness adapter registry
+    pub adapter_registry: Arc<crate::agent::AdapterRegistry>,
+    /// Harness session persistence
+    pub harness_session_repo: crate::agent::HarnessSessionRepo,
 }
 
 impl ApiState {
@@ -235,6 +239,8 @@ pub struct ApiServerBuilder {
     reranker: Option<Arc<dyn agent_core::knowledge::Reranker>>,
     mcp_manager: Option<Arc<crate::mcp::McpServerManager>>,
     sandbox_config: Option<crate::tools::SandboxConfig>,
+    adapter_registry: Arc<crate::agent::AdapterRegistry>,
+    harness_session_repo: Option<crate::agent::HarnessSessionRepo>,
 }
 
 impl ApiServerBuilder {
@@ -294,6 +300,8 @@ impl ApiServerBuilder {
             reranker: None,
             mcp_manager: None,
             sandbox_config: None,
+            adapter_registry: Arc::new(crate::agent::AdapterRegistry::new()),
+            harness_session_repo: None,
         }
     }
 
@@ -301,6 +309,18 @@ impl ApiServerBuilder {
     #[must_use]
     pub fn sandbox_config(mut self, config: Option<crate::tools::SandboxConfig>) -> Self {
         self.sandbox_config = config;
+        self
+    }
+
+    /// Set the harness adapter registry and session repo
+    #[must_use]
+    pub fn harness(
+        mut self,
+        adapter_registry: Arc<crate::agent::AdapterRegistry>,
+        harness_session_repo: crate::agent::HarnessSessionRepo,
+    ) -> Self {
+        self.adapter_registry = adapter_registry;
+        self.harness_session_repo = Some(harness_session_repo);
         self
     }
 
@@ -620,6 +640,7 @@ impl ApiServerBuilder {
             synapse_billing::UsageRecorder::new((*bs.client).clone(), meter_keys)
         });
 
+        let db_for_harness = self.db.clone();
         let state = Arc::new(ApiState {
             db: self.db,
             api_key: self.api_key,
@@ -684,6 +705,10 @@ impl ApiServerBuilder {
             mcp_manager: self.mcp_manager,
             sandbox_config: self.sandbox_config,
             usage_repo: Some(usage_repo),
+            adapter_registry: self.adapter_registry,
+            harness_session_repo: self
+                .harness_session_repo
+                .unwrap_or_else(|| crate::agent::HarnessSessionRepo::new(db_for_harness)),
         });
 
         ApiServer {

@@ -85,6 +85,9 @@ pub struct AgentFileConfig {
     /// Channel-to-agent bindings
     #[serde(default)]
     pub bindings: Vec<AgentBindingFileConfig>,
+    /// Harness configuration (if set, agent uses external CLI instead of Synapse)
+    #[serde(default)]
+    pub harness: Option<crate::agent::HarnessConfig>,
 }
 
 /// Channel binding in TOML

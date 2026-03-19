@@ -35,3 +35,4 @@ Lighting the beacon
 - Extensible hook events with custom namespaces, wildcard matching, and `POST /api/hooks/emit` endpoint
 - Multi-provider vision processing with ordered fallback (Synapse, OpenAI, Gemini)
 - Multi-provider STT with ordered fallback (Synapse, Whisper, Deepgram)
+- Harness adapter system for delegating agent execution to external CLI tools (Claude Code CLI) with session persistence, cost tracking, and MCP integration

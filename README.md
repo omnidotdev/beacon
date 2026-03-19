@@ -2,58 +2,66 @@
 
 # Beacon Gateway
 
-Core voice and messaging gateway daemon
+Always-on voice and messaging gateway for AI assistants
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
+
+[Website](https://beacon.omni.dev) | [Discord](https://discord.gg/omnidotdev) | [GitHub](https://github.com/omnidotdev/beacon)
 
 </div>
 
 ## Overview
 
-Beacon Gateway is the always-on Rust daemon that powers voice and messaging for AI assistants. It handles wake word detection, speech processing, messaging channel adapters, persona management, and agent integration.
+Beacon is a Rust daemon that connects AI assistants to voice and 13+ messaging platforms through a single gateway. It handles wake word detection, speech processing, multi-channel messaging, persona management, persistent memory, and tool execution -- all local-first with BYOK provider keys.
 
-## Features
+## Quick start
 
-- **Voice Processing** - Wake word detection, STT (Whisper), TTS (OpenAI/ElevenLabs)
-- **Messaging Channels** - Discord, Slack, WhatsApp, Telegram, Signal, Teams, Matrix, Google Chat, iMessage
-- **Agent Integration** - Uses Omni CLI as the intelligence layer
-- **Persona Management** - Configurable assistants via [persona.json](https://persona.omni.dev)
-- **Device Identity** - Ed25519 keypair-based authentication
-- **Local-First** - All data stays on your machine
+### 1. Configure
 
-## Prerequisites
+```bash
+# Interactive setup (recommended)
+beacon setup
 
-- [Rust](https://rustup.rs) 1.85+
-- API keys (see `.env.local.template` in metarepo)
+# Or manually: copy the template and add your API keys
+cp .env.local.template .env.local
+```
+
+At minimum you need one AI provider key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+
+### 2. Run
+
+```bash
+# Voice + messaging
+beacon --foreground -v
+
+# Messaging only (headless)
+beacon --disable-voice
+```
+
+The gateway starts on `http://localhost:18789` and connects to any configured channels.
+
+### 3. Diagnostics
+
+```bash
+beacon doctor    # Health check
+beacon status    # Service status
+```
 
 ## Development
 
 ```bash
-# From metarepo root
-tilt up
-
-# Or directly
 cargo build
-cargo run -- --persona orin --foreground -v
-```
-
-## Testing
-
-```bash
 cargo test
-```
-
-## Docker
-
-```bash
-docker build -t beacon-gateway .
-docker run beacon-gateway
+cargo clippy
+cargo run -- --foreground -v
 ```
 
 ## Ecosystem
 
-- **[Omni CLI](https://github.com/omnidotdev/cli)**: Agentic CLI that powers Beacon's intelligence layer
-- **[Omni Terminal](https://github.com/omnidotdev/terminal)**: GPU-accelerated terminal emulator built to run everywhere
+- **[Omni CLI](https://github.com/omnidotdev/cli)** -- Agentic CLI sharing the agent-core library
+- **[Omni Terminal](https://github.com/omnidotdev/terminal)** -- GPU-accelerated terminal emulator
+- **[persona.json](https://persona.omni.dev)** -- Portable entity identity spec
+- **[life.json](https://life.omni.dev)** -- Portable human identity spec
 
 ## License
 

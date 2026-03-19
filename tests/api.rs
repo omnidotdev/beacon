@@ -28,6 +28,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
     let canvas = Arc::new(Mutex::new(Canvas::new()));
 
     let telegram_group_repo = beacon_gateway::db::TelegramGroupConfigRepo::new(db.clone());
+    let db_for_harness = db.clone();
 
     let state = Arc::new(beacon_gateway::api::ApiState {
         db,
@@ -94,6 +95,8 @@ fn build_test_router(db: DbPool) -> axum::Router {
         mcp_manager: None,
         sandbox_config: None,
         usage_repo: None,
+        adapter_registry: Arc::new(beacon_gateway::agent::AdapterRegistry::new()),
+        harness_session_repo: beacon_gateway::agent::HarnessSessionRepo::new(db_for_harness),
     });
 
     Router::new()
