@@ -85,7 +85,10 @@ impl HarnessAdapter for ClaudeCliAdapter {
         session_id: Option<&str>,
     ) -> crate::Result<HarnessOutput> {
         let mut cmd = Command::new("claude");
-        cmd.arg("--print").arg("--output-format").arg("stream-json");
+        cmd.arg("--print")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose");
 
         // Session resumption
         if let Some(sid) = session_id {
@@ -117,8 +120,8 @@ impl HarnessAdapter for ClaudeCliAdapter {
             cmd.env(key, value);
         }
 
-        // Prompt via --prompt flag
-        cmd.arg("--prompt").arg(prompt);
+        // Prompt as positional argument
+        cmd.arg(prompt);
 
         tracing::info!(adapter = "claude_cli", "spawning harness");
 
