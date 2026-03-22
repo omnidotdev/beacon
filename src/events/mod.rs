@@ -138,7 +138,7 @@ impl OmniEvent {
             id: Uuid::new_v4().to_string(),
             event_type: event_type.to_string(),
             subject: None,
-            source: "beacon-gateway".to_string(),
+            source: "omni.beacon".to_string(),
             data,
             timestamp: chrono::Utc::now().to_rfc3339(),
             organization_id: organization_id.to_string(),
@@ -424,7 +424,7 @@ mod tests {
     fn conversation_started_event_has_correct_type() {
         let event = build_conversation_started_event("sess-1", "discord", "org-1");
         assert_eq!(event.event_type, "beacon.conversation.started");
-        assert_eq!(event.source, "beacon-gateway");
+        assert_eq!(event.source, "omni.beacon");
         assert_eq!(event.subject, Some("sess-1".to_string()));
         assert_eq!(event.organization_id, "org-1");
         assert_eq!(event.data["channel"], "discord");
@@ -435,7 +435,7 @@ mod tests {
     fn conversation_ended_event_has_correct_type() {
         let event = build_conversation_ended_event("sess-2", "slack", "org-2");
         assert_eq!(event.event_type, "beacon.conversation.ended");
-        assert_eq!(event.source, "beacon-gateway");
+        assert_eq!(event.source, "omni.beacon");
         assert_eq!(event.subject, Some("sess-2".to_string()));
         assert_eq!(event.organization_id, "org-2");
         assert_eq!(event.data["channel"], "slack");
@@ -446,7 +446,7 @@ mod tests {
     fn tool_executed_event_has_correct_type() {
         let event = build_tool_executed_event("sess-3", "web_search", true, "org-3");
         assert_eq!(event.event_type, "beacon.tool.executed");
-        assert_eq!(event.source, "beacon-gateway");
+        assert_eq!(event.source, "omni.beacon");
         assert_eq!(event.subject, Some("sess-3".to_string()));
         assert_eq!(event.organization_id, "org-3");
         assert_eq!(event.data["toolName"], "web_search");
