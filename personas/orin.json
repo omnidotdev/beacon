@@ -60,25 +60,29 @@
     "integrations": [
       {
         "type": "mcp",
-        "name": "backfeed",
-        "transport": "stdio",
-        "command": "bunx",
-        "args": ["@omnidotdev/backfeed-mcp"],
-        "env": {
-          "API_URL": "https://api.backfeed.omni.dev/graphql"
-        },
-        "description": "Backfeed user feedback platform"
+        "id": "backfeed",
+        "config": {
+          "transport": "stdio",
+          "command": "bunx",
+          "args": ["@omnidotdev/backfeed-mcp"],
+          "env": {
+            "API_URL": "https://api.backfeed.omni.dev/graphql"
+          },
+          "description": "Backfeed user feedback platform"
+        }
       },
       {
         "type": "mcp",
-        "name": "runa",
-        "transport": "stdio",
-        "command": "bunx",
-        "args": ["@omnidotdev/runa-mcp"],
-        "env": {
-          "API_URL": "https://api.runa.omni.dev/graphql"
-        },
-        "description": "Runa project management"
+        "id": "runa",
+        "config": {
+          "transport": "stdio",
+          "command": "bunx",
+          "args": ["@omnidotdev/runa-mcp"],
+          "env": {
+            "API_URL": "https://api.runa.omni.dev/graphql"
+          },
+          "description": "Runa project management"
+        }
       }
     ]
   },
