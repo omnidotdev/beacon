@@ -1,8 +1,8 @@
 <div align="center">
 
-# Beacon Gateway
+# Beacon
 
-Always-on voice and messaging gateway for AI assistants
+Voice and messaging gateway for AI assistants
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 
@@ -13,6 +13,24 @@ Always-on voice and messaging gateway for AI assistants
 ## Overview
 
 Beacon is a Rust daemon that connects AI assistants to voice and 13+ messaging platforms through a single gateway. It handles wake word detection, speech processing, multi-channel messaging, persona management, persistent memory, and tool execution -- all local-first with BYOK provider keys.
+
+## Installation
+
+### From source (current)
+
+```bash
+cargo install --path .
+```
+
+Requires [Rust](https://rustup.rs) 1.88+.
+
+### Via Omni CLI (coming soon)
+
+```bash
+omni install beacon
+```
+
+The [Omni CLI](https://github.com/omnidotdev/cli) will be the recommended way to install and manage Beacon once available.
 
 ## Quick start
 
