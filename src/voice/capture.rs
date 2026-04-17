@@ -15,6 +15,8 @@ pub struct AudioCapture {
     #[allow(dead_code)]
     device: Device,
     config: StreamConfig,
+    channels: u16,
+    native_rate: u32,
     buffer: Arc<Mutex<Vec<f32>>>,
     stream: Option<Stream>,
 }
@@ -32,30 +34,54 @@ impl AudioCapture {
             .default_input_device()
             .ok_or_else(|| Error::Audio("no input device available".to_string()))?;
 
-        let supported_config = device
+        // Collect all supported configs, sorted by preference:
+        // 1. Prefer configs that support 16kHz natively (avoid resampling)
+        // 2. Prefer fewer channels (mono ideal)
+        let mut configs: Vec<_> = device
             .supported_input_configs()
             .map_err(|e| Error::Audio(e.to_string()))?
+            .collect();
+
+        // Sort: mono first, then by fewest channels
+        configs.sort_by_key(|c| c.channels());
+
+        // Try to find a config that supports 16kHz natively
+        let (supported_config, rate) = configs
+            .iter()
             .find(|c| {
-                c.channels() == 1
-                    && c.min_sample_rate() <= SampleRate(SAMPLE_RATE)
+                c.min_sample_rate() <= SampleRate(SAMPLE_RATE)
                     && c.max_sample_rate() >= SampleRate(SAMPLE_RATE)
             })
-            .ok_or_else(|| Error::Audio("no suitable audio config found".to_string()))?;
+            .map(|c| (c.clone(), SAMPLE_RATE))
+            .or_else(|| {
+                // Fall back to device default rate (typically 44.1kHz or 48kHz) — we resample later
+                configs.first().map(|c| {
+                    // Use the max supported rate (usually 48kHz)
+                    let native = c.max_sample_rate().0;
+                    (c.clone(), native)
+                })
+            })
+            .ok_or_else(|| Error::Audio("no supported audio config found".to_string()))?;
 
+        let channels = supported_config.channels();
         let config = supported_config
-            .with_sample_rate(SampleRate(SAMPLE_RATE))
+            .with_sample_rate(SampleRate(rate))
             .config();
 
         tracing::debug!(
             device = device.name().unwrap_or_default(),
-            sample_rate = SAMPLE_RATE,
-            channels = config.channels,
+            native_rate = rate,
+            target_rate = SAMPLE_RATE,
+            channels,
+            resample = rate != SAMPLE_RATE,
             "audio capture initialized"
         );
 
         Ok(Self {
             device,
             config,
+            channels,
+            native_rate: rate,
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
         })
@@ -78,13 +104,23 @@ impl AudioCapture {
             .ok_or_else(|| Error::Audio("no input device".to_string()))?;
 
         let config = self.config.clone();
+        let channels = self.channels;
 
         let stream = device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if let Ok(mut buf) = buffer.lock() {
-                        buf.extend_from_slice(data);
+                        if channels == 1 {
+                            buf.extend_from_slice(data);
+                        } else {
+                            // Downmix to mono by averaging channels per frame
+                            let ch = channels as usize;
+                            for frame in data.chunks_exact(ch) {
+                                let mono: f32 = frame.iter().sum::<f32>() / channels as f32;
+                                buf.push(mono);
+                            }
+                        }
                     }
                 },
                 |err| {
@@ -111,22 +147,28 @@ impl AudioCapture {
 
     /// Get captured audio buffer and clear it
     ///
-    /// Returns the audio samples captured since last call
+    /// Returns mono audio resampled to [`SAMPLE_RATE`]
     #[must_use]
     pub fn take_buffer(&self) -> Vec<f32> {
-        self.buffer
+        let raw = self
+            .buffer
             .lock()
             .map(|mut buf| std::mem::take(&mut *buf))
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        self.maybe_resample(raw)
     }
 
     /// Get captured audio buffer without clearing
     #[must_use]
     pub fn peek_buffer(&self) -> Vec<f32> {
-        self.buffer
+        let raw = self
+            .buffer
             .lock()
             .map(|buf| buf.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        self.maybe_resample(raw)
     }
 
     /// Clear the audio buffer
@@ -146,6 +188,34 @@ impl AudioCapture {
     #[must_use]
     pub const fn sample_rate(&self) -> u32 {
         SAMPLE_RATE
+    }
+
+    /// Resample from native rate to [`SAMPLE_RATE`] if needed
+    #[allow(clippy::cast_possible_truncation)]
+    fn maybe_resample(&self, samples: Vec<f32>) -> Vec<f32> {
+        if self.native_rate == SAMPLE_RATE || samples.is_empty() {
+            return samples;
+        }
+
+        // Simple linear interpolation resampler — low overhead for real-time voice
+        let ratio = self.native_rate as f64 / SAMPLE_RATE as f64;
+        let out_len = (samples.len() as f64 / ratio) as usize;
+        let mut output = Vec::with_capacity(out_len);
+
+        for i in 0..out_len {
+            let src_idx = i as f64 * ratio;
+            let idx = src_idx as usize;
+            let frac = (src_idx - idx as f64) as f32;
+
+            let sample = if idx + 1 < samples.len() {
+                samples[idx] * (1.0 - frac) + samples[idx + 1] * frac
+            } else {
+                samples[idx.min(samples.len() - 1)]
+            };
+            output.push(sample);
+        }
+
+        output
     }
 }
 

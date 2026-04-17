@@ -258,7 +258,16 @@ fn restart_launchd() -> Result<()> {
         .args([
             "kickstart",
             "-k",
-            &format!("gui/{}/{LAUNCHD_LABEL}", unsafe { libc::getuid() }),
+            &format!(
+                "gui/{}/{LAUNCHD_LABEL}",
+                std::process::Command::new("id")
+                    .arg("-u")
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            ),
         ])
         .output();
 

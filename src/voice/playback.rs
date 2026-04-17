@@ -16,6 +16,7 @@ pub struct AudioPlayback {
     #[allow(dead_code)]
     device: Device,
     config: StreamConfig,
+    native_rate: u32,
 }
 
 impl AudioPlayback {
@@ -31,36 +32,47 @@ impl AudioPlayback {
             .default_output_device()
             .ok_or_else(|| Error::Audio("no output device available".to_string()))?;
 
-        let supported_config = device
+        let mut configs: Vec<_> = device
             .supported_output_configs()
             .map_err(|e| Error::Audio(e.to_string()))?
+            .collect();
+
+        // Prefer fewer channels
+        configs.sort_by_key(|c| c.channels());
+
+        // Try to find a config supporting 24kHz natively, otherwise fall back to device native rate
+        let (supported_config, rate) = configs
+            .iter()
             .find(|c| {
-                c.channels() == 1
-                    && c.min_sample_rate() <= SampleRate(PLAYBACK_SAMPLE_RATE)
+                c.min_sample_rate() <= SampleRate(PLAYBACK_SAMPLE_RATE)
                     && c.max_sample_rate() >= SampleRate(PLAYBACK_SAMPLE_RATE)
             })
+            .map(|c| (c.clone(), PLAYBACK_SAMPLE_RATE))
             .or_else(|| {
-                // Fallback: try stereo
-                device.supported_output_configs().ok()?.find(|c| {
-                    c.channels() == 2
-                        && c.min_sample_rate() <= SampleRate(PLAYBACK_SAMPLE_RATE)
-                        && c.max_sample_rate() >= SampleRate(PLAYBACK_SAMPLE_RATE)
-                })
+                configs
+                    .first()
+                    .map(|c| (c.clone(), c.max_sample_rate().0))
             })
-            .ok_or_else(|| Error::Audio("no suitable output config found".to_string()))?;
+            .ok_or_else(|| Error::Audio("no supported output config found".to_string()))?;
 
         let config = supported_config
-            .with_sample_rate(SampleRate(PLAYBACK_SAMPLE_RATE))
+            .with_sample_rate(SampleRate(rate))
             .config();
 
         tracing::debug!(
             device = device.name().unwrap_or_default(),
-            sample_rate = PLAYBACK_SAMPLE_RATE,
+            native_rate = rate,
+            target_rate = PLAYBACK_SAMPLE_RATE,
             channels = config.channels,
+            resample = rate != PLAYBACK_SAMPLE_RATE,
             "audio playback initialized"
         );
 
-        Ok(Self { device, config })
+        Ok(Self {
+            device,
+            config,
+            native_rate: rate,
+        })
     }
 
     /// Play audio samples (f32 format)
@@ -84,11 +96,41 @@ impl AudioPlayback {
         self.play_samples_blocking(samples)
     }
 
+    /// Resample from source rate to device native rate if needed
+    #[allow(clippy::cast_possible_truncation)]
+    fn maybe_resample(&self, samples: Vec<f32>) -> Vec<f32> {
+        if self.native_rate == PLAYBACK_SAMPLE_RATE || samples.is_empty() {
+            return samples;
+        }
+
+        let ratio = PLAYBACK_SAMPLE_RATE as f64 / self.native_rate as f64;
+        let out_len = (samples.len() as f64 / ratio) as usize;
+        let mut output = Vec::with_capacity(out_len);
+
+        for i in 0..out_len {
+            let src_idx = i as f64 * ratio;
+            let idx = src_idx as usize;
+            let frac = (src_idx - idx as f64) as f32;
+
+            let sample = if idx + 1 < samples.len() {
+                samples[idx] * (1.0 - frac) + samples[idx + 1] * frac
+            } else {
+                samples[idx.min(samples.len() - 1)]
+            };
+            output.push(sample);
+        }
+
+        output
+    }
+
     /// Play samples in a blocking manner
     fn play_samples_blocking(&self, samples: Vec<f32>) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
         }
+
+        // Resample from 24kHz to device native rate if needed
+        let samples = self.maybe_resample(samples);
 
         let host = cpal::default_host();
         let device = host
@@ -141,7 +183,7 @@ impl AudioPlayback {
 
         // Wait for playback to finish
         let sample_count = samples.lock().unwrap().len();
-        let duration_ms = (sample_count as u64 * 1000) / u64::from(PLAYBACK_SAMPLE_RATE);
+        let duration_ms = (sample_count as u64 * 1000) / u64::from(self.native_rate);
 
         // Poll for completion with timeout
         let start = std::time::Instant::now();
