@@ -3,4 +3,7 @@
 .env*
 !.env*.template
 rustc-ice-*
-.claude/worktrees/
+.claude
+
+# Local path dependency (machine-specific)
+/agent-core
