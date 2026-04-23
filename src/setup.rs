@@ -390,15 +390,25 @@ fn serialize_mcp_servers(servers: &[crate::mcp::McpServerConfig], out: &mut Stri
     for server in servers {
         out.push_str("[[mcp_servers]]\n");
         let _ = writeln!(out, "name = \"{}\"", server.name);
-        let _ = writeln!(out, "command = \"{}\"", server.command);
-        if !server.args.is_empty() {
-            let args_str: Vec<String> = server.args.iter().map(|a| format!("\"{a}\"")).collect();
-            let _ = writeln!(out, "args = [{}]", args_str.join(", "));
-        }
-        if !server.env.is_empty() {
-            out.push_str("[mcp_servers.env]\n");
-            for (k, v) in &server.env {
-                let _ = writeln!(out, "{k} = \"{v}\"");
+        match &server.transport {
+            crate::mcp::McpTransport::Stdio { command, args, env } => {
+                let _ = writeln!(out, "type = \"stdio\"");
+                let _ = writeln!(out, "command = \"{command}\"");
+                if !args.is_empty() {
+                    let args_str: Vec<String> =
+                        args.iter().map(|a| format!("\"{a}\"")).collect();
+                    let _ = writeln!(out, "args = [{}]", args_str.join(", "));
+                }
+                if !env.is_empty() {
+                    out.push_str("[mcp_servers.env]\n");
+                    for (k, v) in env {
+                        let _ = writeln!(out, "{k} = \"{v}\"");
+                    }
+                }
+            }
+            crate::mcp::McpTransport::Http { url } => {
+                let _ = writeln!(out, "type = \"http\"");
+                let _ = writeln!(out, "url = \"{url}\"");
             }
         }
         out.push('\n');
@@ -612,9 +622,11 @@ fn setup_mcp_servers(
         let (name, command, args) = available[idx];
         servers.push(crate::mcp::McpServerConfig {
             name: name.to_string(),
-            command: command.to_string(),
-            args: args.iter().map(ToString::to_string).collect(),
-            env: std::collections::HashMap::new(),
+            transport: crate::mcp::McpTransport::Stdio {
+                command: command.to_string(),
+                args: args.iter().map(ToString::to_string).collect(),
+                env: std::collections::HashMap::new(),
+            },
         });
         println!("  + Added {name}");
     }
@@ -658,9 +670,11 @@ fn prompt_custom_mcp_server() -> anyhow::Result<Option<crate::mcp::McpServerConf
 
     Ok(Some(crate::mcp::McpServerConfig {
         name,
-        command,
-        args,
-        env: std::collections::HashMap::new(),
+        transport: crate::mcp::McpTransport::Stdio {
+            command,
+            args,
+            env: std::collections::HashMap::new(),
+        },
     }))
 }
 
@@ -740,12 +754,14 @@ mod tests {
         let config = BeaconConfigFile {
             mcp_servers: vec![crate::mcp::McpServerConfig {
                 name: "github".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-github".to_string(),
-                ],
-                env: std::collections::HashMap::new(),
+                transport: crate::mcp::McpTransport::Stdio {
+                    command: "npx".to_string(),
+                    args: vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-github".to_string(),
+                    ],
+                    env: std::collections::HashMap::new(),
+                },
             }],
             ..Default::default()
         };
@@ -801,9 +817,11 @@ mod tests {
             },
             mcp_servers: vec![crate::mcp::McpServerConfig {
                 name: "test".to_string(),
-                command: "echo".to_string(),
-                args: vec![],
-                env: std::collections::HashMap::new(),
+                transport: crate::mcp::McpTransport::Stdio {
+                    command: "echo".to_string(),
+                    args: vec![],
+                    env: std::collections::HashMap::new(),
+                },
             }],
             life_json: Some("~/.life.json".to_string()),
             ..Default::default()

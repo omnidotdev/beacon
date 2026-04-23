@@ -182,9 +182,11 @@ impl PluginManager {
 
                 Some(crate::mcp::McpServerConfig {
                     name: p.manifest.id.clone(),
-                    command: (*command).to_string(),
-                    args: args.iter().map(|s| (*s).to_string()).collect(),
-                    env,
+                    transport: crate::mcp::McpTransport::Stdio {
+                        command: (*command).to_string(),
+                        args: args.iter().map(|s| (*s).to_string()).collect(),
+                        env,
+                    },
                 })
             })
             .collect()
