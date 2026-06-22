@@ -2926,6 +2926,19 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                 }
             }
 
+            // Moderate the assembled response through Say Less before delivery.
+            // This sits ahead of the streaming finalize and the non-streaming
+            // send, so a flagged response is replaced everywhere it could go out.
+            // For streaming, the finalize below overwrites the incrementally
+            // streamed text. Fails open when SAY_LESS_URL is unset or errors
+            if let Ok(say_less_url) = std::env::var("SAY_LESS_URL")
+                && !say_less_url.is_empty()
+                && crate::security::moderation::is_flagged(&say_less_url, &final_response).await
+            {
+                tracing::warn!("response flagged by Say Less; replacing before delivery");
+                "I'm not able to share a response to that.".clone_into(&mut final_response);
+            }
+
             // Finalize streaming message
             if let Some(ref mid) = streaming_msg_id {
                 let _ = channel
