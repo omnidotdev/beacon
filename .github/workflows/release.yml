@@ -30,7 +30,7 @@ jobs:
         id: changesets
         uses: changesets/action@v2
         with:
-          version: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
+          version-script: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
           publish-script: |
             echo "Publishing beacon-gateway@$(jq -r '.version' package.json)"
           pr-title: "chore(release): version packages"
