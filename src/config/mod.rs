@@ -148,7 +148,7 @@ impl Default for MediaConfig {
         Self {
             max_video_frames: 3,
             max_image_size_bytes: 10 * 1024 * 1024, // 10 MB
-            vision_model: "claude-sonnet-4-20250514".to_string(),
+            vision_model: "anthropic/claude-sonnet-5-5".to_string(),
         }
     }
 }
@@ -792,7 +792,7 @@ impl Config {
         let llm_model = std::env::var("BEACON_LLM_MODEL")
             .ok()
             .or(fc.llm.model)
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            .unwrap_or_else(|| "anthropic/claude-sonnet-5-5".to_string());
 
         let cloud_mode = std::env::var("BEACON_CLOUD_MODE")
             .ok()

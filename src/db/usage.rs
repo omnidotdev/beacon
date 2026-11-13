@@ -249,7 +249,7 @@ mod tests {
         repo.record(
             "sess-1",
             "default",
-            "claude-sonnet-4-20250514",
+            "claude-sonnet-5-5",
             "anthropic",
             1000,
             500,

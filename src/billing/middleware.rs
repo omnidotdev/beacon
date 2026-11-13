@@ -262,6 +262,10 @@ async fn check_voice_entitlement(
 /// Check the `conversations` usage meter, using cache when available.
 ///
 /// Used by callers (e.g. WebSocket handler) to gate new conversation creation.
+///
+/// # Errors
+///
+/// Returns an error if the billing service cannot be reached or rejects the usage check.
 pub async fn check_conversations_usage(
     state: &BillingState,
     entity_type: &str,

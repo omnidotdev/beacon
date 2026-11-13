@@ -115,7 +115,7 @@ pub struct EcosystemFileConfig {
 /// LLM-related configuration
 #[derive(Debug, Default, Deserialize)]
 pub struct LlmFileConfig {
-    /// Model identifier (e.g. "claude-sonnet-4-20250514")
+    /// Model identifier (e.g. "anthropic/claude-sonnet-5-5")
     pub model: Option<String>,
 
     /// Preferred provider ("anthropic", "openai", "openrouter")

@@ -28,7 +28,10 @@ use futures::StreamExt as _;
 const CHUNK_SIZE: usize = 1600;
 
 /// Default LLM model
-pub(crate) const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+///
+/// Uses the explicit `provider/model` form so the Synapse gateway resolves it
+/// directly instead of relying on its discovered model list
+pub(crate) const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5-5";
 
 /// Max tokens for responses
 const MAX_TOKENS: u32 = 1024;
@@ -640,7 +643,7 @@ impl Daemon {
         // fall back to direct Anthropic API if Synapse is unavailable
         let vision: Option<Arc<VisionClient>> = if let Some(ref s) = synapse {
             let mut client = VisionClient::from_synapse(Arc::clone(s));
-            if self.config.media.vision_model != "claude-sonnet-4-20250514" {
+            if self.config.media.vision_model != "anthropic/claude-sonnet-5-5" {
                 client = client.with_model(self.config.media.vision_model.clone());
             }
             Some(Arc::new(client))
