@@ -11,8 +11,10 @@ use synapse_client::SynapseClient;
 
 use crate::{Error, Result};
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
-const MAX_VISION_TOKENS: u32 = 300;
+/// Default vision model, in the explicit `provider/model` form Synapse resolves
+const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5-5";
+/// Output cap for a description; leaves headroom for the model's default thinking
+const MAX_VISION_TOKENS: u32 = 1024;
 const VISION_PROMPT: &str = "Describe this image concisely in 1-2 sentences. Focus on the main subject and any text visible.";
 
 /// Vision client for image analysis
@@ -186,8 +188,11 @@ impl VisionClient {
         let base64_data = base64::engine::general_purpose::STANDARD.encode(image_data);
         let media_type = normalize_mime_type(mime_type);
 
+        // The Anthropic API takes the bare model id, without the Synapse provider prefix
+        let model = self.model.strip_prefix("anthropic/").unwrap_or(&self.model);
+
         let request = MessageRequest {
-            model: &self.model,
+            model,
             max_tokens: MAX_VISION_TOKENS,
             messages: vec![DirectMessage {
                 role: "user",

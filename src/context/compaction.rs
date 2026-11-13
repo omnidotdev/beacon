@@ -145,9 +145,11 @@ impl SessionCompactor {
             model: self.model.clone(),
             messages: vec![synapse_client::Message::user(&prompt)],
             stream: false,
-            temperature: Some(0.3),
+            // Current Claude models reject sampling parameters, so leave them unset
+            temperature: None,
             top_p: None,
-            max_tokens: Some(300),
+            // Headroom for the model's default thinking on top of the ~200 word summary
+            max_tokens: Some(1024),
             stop: None,
             tools: None,
             tool_choice: None,

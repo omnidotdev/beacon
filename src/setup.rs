@@ -128,9 +128,9 @@ pub fn run_setup() -> anyhow::Result<()> {
         .as_deref()
         .unwrap_or(match provider_name.as_str() {
             "openai" => "gpt-4o",
-            "openrouter" => "anthropic/claude-sonnet-4-20250514",
+            "openrouter" => "anthropic/claude-sonnet-5.5",
             // "anthropic" and everything else
-            _ => "claude-sonnet-4-20250514",
+            _ => "anthropic/claude-sonnet-5-5",
         });
 
     let model: String = Input::new()
@@ -779,7 +779,7 @@ mod tests {
         let config = BeaconConfigFile {
             persona: Some("orin".to_string()),
             llm: LlmFileConfig {
-                model: Some("claude-sonnet-4-20250514".to_string()),
+                model: Some("anthropic/claude-sonnet-5-5".to_string()),
                 provider: Some("anthropic".to_string()),
             },
             voice: VoiceFileConfig {

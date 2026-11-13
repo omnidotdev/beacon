@@ -170,7 +170,7 @@ mod tests {
         let doc: toml::Value = toml::from_str(
             r#"
             [llm]
-            model = "claude-sonnet-4-20250514"
+            model = "anthropic/claude-sonnet-5-5"
             [voice]
             enabled = true
             "#,
@@ -179,7 +179,9 @@ mod tests {
 
         assert_eq!(
             navigate_toml(&doc, "llm.model"),
-            Some(&toml::Value::String("claude-sonnet-4-20250514".to_string()))
+            Some(&toml::Value::String(
+                "anthropic/claude-sonnet-5-5".to_string()
+            ))
         );
         assert_eq!(
             navigate_toml(&doc, "voice.enabled"),
