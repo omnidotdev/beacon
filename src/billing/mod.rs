@@ -23,7 +23,7 @@ use mini_moka::sync::Cache;
 use secrecy::SecretString;
 use synapse_billing::AetherClient;
 
-pub use tier::{FREE_TIER_MODEL, PlanTier};
+pub use tier::{GATEWAY_DEFAULT_MODEL, PlanTier};
 
 /// Aether app id Beacon bills and checks entitlements against.
 ///
@@ -183,7 +183,7 @@ impl BillingState {
     }
 }
 
-/// Default managed model for a user: the free tier gets [`FREE_TIER_MODEL`],
+/// Default managed model for a user: the free tier gets [`GATEWAY_DEFAULT_MODEL`],
 /// paid tiers keep `paid_default`. Without billing the tier is unknown, so the
 /// free default applies
 pub async fn default_model_for_user(
@@ -447,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn default_model_without_billing_is_the_free_tier_model() {
         let model = default_model_for_user(None, "u", "anthropic/claude-sonnet-5-5").await;
-        assert_eq!(model, FREE_TIER_MODEL);
+        assert_eq!(model, GATEWAY_DEFAULT_MODEL);
     }
 
     #[tokio::test]
@@ -475,6 +475,6 @@ mod tests {
         .unwrap();
         let state = BillingState::from_config(config).unwrap();
         let model = default_model_for_user(Some(&state), "u", "anthropic/claude-sonnet-5-5").await;
-        assert_eq!(model, FREE_TIER_MODEL);
+        assert_eq!(model, GATEWAY_DEFAULT_MODEL);
     }
 }

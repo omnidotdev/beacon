@@ -1,3 +1,4 @@
+pub mod gateway_models;
 mod local_store;
 pub mod provisioner;
 pub mod resolver;
