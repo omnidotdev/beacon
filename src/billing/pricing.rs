@@ -1,4 +1,9 @@
 //! Model pricing catalog for local cost estimation
+//!
+//! Feeds only the local usage log (`/api/usage`, the operator's own
+//! estimate). It is never used to bill or to show credits: managed spend is
+//! priced, marked up, and deducted by the Synapse gateway alone, and the
+//! user's balance comes from Aether. `tests/billing_guard.rs` keeps it that way
 
 /// Pricing rates for a model (per million tokens)
 #[derive(Debug, Clone)]

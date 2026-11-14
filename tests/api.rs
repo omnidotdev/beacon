@@ -71,7 +71,6 @@ fn build_test_router(db: DbPool) -> axum::Router {
         rate_limiter: None,
         ws_senders: None,
         billing_state: None,
-        usage_recorder: None,
         skill_filter: beacon_gateway::skills::SkillFilter::default(),
         voice_enabled: false,
         skills_config: beacon_gateway::config::SkillsConfig::default(),

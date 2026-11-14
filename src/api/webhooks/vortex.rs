@@ -196,8 +196,22 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
     // Get user for context building
     let user = state.user_repo.find_or_create(user_id)?;
 
+    // Cloud mode runs on the user's product-scoped managed key (never the
+    // shared client); self-hosted uses the local client
+    let (check_in_client, check_in_model) = if state.cloud_mode {
+        match crate::api::managed::managed_client(state, user_id).await {
+            Ok(managed) => (Some(managed.client), managed.default_model),
+            Err(e) => {
+                tracing::warn!(error = ?e, "check-in: managed AI unavailable, sending the plain prompt");
+                (None, state.llm_model.clone())
+            }
+        }
+    } else {
+        (state.synapse.clone(), state.llm_model.clone())
+    };
+
     // Generate check-in message via Synapse if available
-    let check_in_message = if let Some(synapse) = &state.synapse {
+    let check_in_message = if let Some(synapse) = &check_in_client {
         // Find or create session for this channel
         let channel_id_str = channel_id.unwrap_or(user_id);
         let session = state.session_repo.find_or_create(
@@ -227,7 +241,7 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
             .map_or_else(|_| prompt.to_string(), |ctx| ctx.format_prompt(prompt));
 
         let request = synapse_client::ChatRequest {
-            model: state.llm_model.clone(),
+            model: check_in_model,
             messages: vec![
                 synapse_client::Message::system(&state.system_prompt_with_skills(None)),
                 synapse_client::Message::user(&augmented_prompt),
@@ -337,19 +351,43 @@ async fn handle_agent_run(state: &ApiState, callback: &VortexCallback) -> crate:
 
     let max_iterations = payload.max_iterations.unwrap_or(10);
 
+    // Cloud mode runs on the user's product-scoped managed key; there is no
+    // shared-key fallback for managed traffic
+    let (synapse_override, model) = if state.cloud_mode {
+        let managed = crate::api::managed::managed_client(state, &payload.user_id)
+            .await
+            .map_err(|e| crate::Error::Agent(format!("managed AI unavailable: {e:?}")))?;
+        (Some(managed.client), managed.default_model)
+    } else {
+        (None, state.llm_model.clone())
+    };
+
     let agent_config = AgentRunConfig {
         prompt: augmented_prompt,
         system_prompt,
-        model: state.llm_model.clone(),
+        model,
         max_tokens: state.llm_max_tokens,
         max_iterations,
         session_id: session.id.clone(),
         user_id: user.id.clone(),
         notify: None,
-        synapse_override: None,
+        synapse_override,
     };
 
-    let result = run_agent_turn(state, agent_config).await?;
+    // A gateway refusal (out of credits, unavailable) is delivered to the
+    // channel as a user-facing notice instead of failing silently
+    let result = match run_agent_turn(state, agent_config).await {
+        Ok(text) => text,
+        Err(e) => match crate::billing::gateway_error::classify(&e.to_string()) {
+            Some(failure) => {
+                if state.cloud_mode {
+                    crate::api::managed::note_gateway_failure(state, &payload.user_id, failure);
+                }
+                failure.user_message()
+            }
+            None => return Err(e),
+        },
+    };
 
     // Deliver result to the specified channel
     let delivery_channel: DeliveryChannel = payload.channel.parse()?;
