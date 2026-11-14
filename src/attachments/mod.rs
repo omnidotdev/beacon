@@ -16,31 +16,41 @@ use crate::channels::{Attachment, AttachmentKind};
 pub use vision::VisionClient;
 
 /// Processes attachments and returns text descriptions/transcriptions
+///
+/// Vision and transcription run only on the gateway client the caller passes
+/// for the turn (the user's product-scoped key in cloud mode, the operator's
+/// gateway when self-hosted), so attachment AI is metered and charged exactly
+/// like chat. Without a gateway client, media is left as a placeholder; PDF
+/// text extraction is local and always runs
 pub struct AttachmentProcessor {
-    /// Vision client for image analysis
-    vision: Option<Arc<VisionClient>>,
-    /// Synapse client for audio transcription
-    synapse: Option<Arc<SynapseClient>>,
-    /// STT model identifier for Synapse transcription
+    /// Gateway model for image and keyframe descriptions
+    vision_model: String,
+    /// STT model identifier for gateway transcription
     stt_model: String,
+    /// Operator's own gateway for channel messages that carry no Omni
+    /// identity; set only on self-hosted instances, never in cloud mode
+    operator_gateway: Option<Arc<SynapseClient>>,
     /// HTTP client for downloading attachments
     client: reqwest::Client,
     /// Maximum keyframes to extract from video
     max_video_frames: u32,
 }
 
+/// The gateway client one turn's attachment AI runs on
+#[derive(Clone, Copy)]
+struct Turn<'a> {
+    vision: Option<&'a VisionClient>,
+    synapse: Option<&'a Arc<SynapseClient>>,
+}
+
 impl AttachmentProcessor {
     /// Create a new attachment processor
     #[must_use]
-    pub fn new(
-        vision: Option<Arc<VisionClient>>,
-        synapse: Option<Arc<SynapseClient>>,
-        stt_model: String,
-    ) -> Self {
+    pub fn new(vision_model: String, stt_model: String) -> Self {
         Self {
-            vision,
-            synapse,
+            vision_model,
             stt_model,
+            operator_gateway: None,
             client: reqwest::Client::new(),
             max_video_frames: 3,
         }
@@ -53,20 +63,49 @@ impl AttachmentProcessor {
         self
     }
 
+    /// Set the operator's gateway for channel messages without an Omni
+    /// identity (self-hosted only)
+    #[must_use]
+    pub fn with_operator_gateway(mut self, gateway: Option<Arc<SynapseClient>>) -> Self {
+        self.operator_gateway = gateway;
+        self
+    }
+
+    /// The operator's gateway, if this is a self-hosted instance
+    #[must_use]
+    pub const fn operator_gateway(&self) -> Option<&Arc<SynapseClient>> {
+        self.operator_gateway.as_ref()
+    }
+
     /// Process all attachments and return augmented text
+    ///
+    /// `gateway` is the client this turn's AI runs on; `None` leaves images,
+    /// audio, and video as placeholders
     ///
     /// # Errors
     ///
     /// Returns error if attachment processing fails
-    pub async fn process_attachments(&self, attachments: &[Attachment]) -> Result<String> {
+    pub async fn process_attachments(
+        &self,
+        attachments: &[Attachment],
+        gateway: Option<&Arc<SynapseClient>>,
+    ) -> Result<String> {
         if attachments.is_empty() {
             return Ok(String::new());
         }
 
+        let vision = gateway.map(|client| {
+            VisionClient::from_synapse(Arc::clone(client)).with_model(self.vision_model.clone())
+        });
+        let turn = Turn {
+            vision: vision.as_ref(),
+            synapse: gateway,
+        };
+
         let mut parts = Vec::new();
 
         for attachment in attachments {
-            let description = self.process_single(attachment).await;
+            let description = self.process_single(attachment, turn).await;
             parts.push(description);
         }
 
@@ -74,18 +113,22 @@ impl AttachmentProcessor {
     }
 
     /// Process a single attachment
-    async fn process_single(&self, attachment: &Attachment) -> String {
+    async fn process_single(&self, attachment: &Attachment, turn: Turn<'_>) -> String {
         match attachment.kind {
-            AttachmentKind::Image => self.process_image(attachment).await,
-            AttachmentKind::Audio => self.process_audio(attachment).await,
-            AttachmentKind::Video => self.process_video(attachment).await,
+            AttachmentKind::Image => self.process_image(attachment, turn.vision).await,
+            AttachmentKind::Audio => self.process_audio(attachment, turn.synapse).await,
+            AttachmentKind::Video => self.process_video(attachment, turn.vision).await,
             AttachmentKind::File => self.process_file(attachment).await,
         }
     }
 
     /// Process an image attachment using vision
-    async fn process_image(&self, attachment: &Attachment) -> String {
-        let Some(vision) = &self.vision else {
+    async fn process_image(
+        &self,
+        attachment: &Attachment,
+        vision: Option<&VisionClient>,
+    ) -> String {
+        let Some(vision) = vision else {
             return format!(
                 "[Image: {}]",
                 attachment.filename.as_deref().unwrap_or("image")
@@ -127,8 +170,12 @@ impl AttachmentProcessor {
     }
 
     /// Process an audio attachment using Synapse STT
-    async fn process_audio(&self, attachment: &Attachment) -> String {
-        let Some(synapse) = &self.synapse else {
+    async fn process_audio(
+        &self,
+        attachment: &Attachment,
+        synapse: Option<&Arc<SynapseClient>>,
+    ) -> String {
+        let Some(synapse) = synapse else {
             return format!(
                 "[Audio: {}]",
                 attachment.filename.as_deref().unwrap_or("audio")
@@ -182,10 +229,14 @@ impl AttachmentProcessor {
     }
 
     /// Process a video attachment by extracting keyframes and analyzing with vision
-    async fn process_video(&self, attachment: &Attachment) -> String {
+    async fn process_video(
+        &self,
+        attachment: &Attachment,
+        vision: Option<&VisionClient>,
+    ) -> String {
         let filename = attachment.filename.as_deref().unwrap_or("video");
 
-        let Some(vision) = &self.vision else {
+        let Some(vision) = vision else {
             return format!("[Video: {filename}]");
         };
 
@@ -302,7 +353,7 @@ fn convert_to_wav(data: &[u8], mime_type: &str) -> Result<Vec<u8>> {
             ))
         }
         _ => {
-            // Try to use as-is and let Whisper handle it
+            // Try to use as-is and let the gateway STT provider handle it
             Ok(data.to_vec())
         }
     }

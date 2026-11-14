@@ -9,7 +9,7 @@ use synapse_client::SynapseClient;
 use tokio::sync::mpsc;
 
 use crate::api::{ApiServerBuilder, ModelInfo};
-use crate::attachments::{AttachmentProcessor, VisionClient};
+use crate::attachments::AttachmentProcessor;
 #[cfg(target_os = "macos")]
 use crate::channels::IMessageChannel;
 use crate::channels::{
@@ -644,30 +644,22 @@ impl Daemon {
             }
         }
 
-        // Initialize vision client: prefer Synapse for provider-agnostic routing,
-        // fall back to direct Anthropic API if Synapse is unavailable
-        let vision: Option<Arc<VisionClient>> = if let Some(ref s) = synapse {
-            let mut client = VisionClient::from_synapse(Arc::clone(s));
-            if self.config.media.vision_model != "anthropic/claude-sonnet-5-5" {
-                client = client.with_model(self.config.media.vision_model.clone());
-            }
-            Some(Arc::new(client))
+        // Attachment AI (vision, transcription) runs on each turn's gateway
+        // client. Channel messages carry no Omni identity, so only a
+        // self-hosted instance lends them the operator's gateway; cloud mode
+        // never runs unbilled attachment AI
+        let operator_gateway = if self.config.cloud_mode {
+            None
         } else {
-            self.config
-                .api_keys
-                .anthropic
-                .as_ref()
-                .and_then(|key| VisionClient::new(key).map(Arc::new).ok())
+            synapse.as_ref().map(Arc::clone)
         };
-
-        // Create attachment processor with vision and Synapse (for audio transcription)
         let attachment_processor = Arc::new(
             AttachmentProcessor::new(
-                vision,
-                synapse.as_ref().map(Arc::clone),
+                self.config.media.vision_model.clone(),
                 self.config.voice.stt_model.clone(),
             )
-            .with_max_video_frames(self.config.media.max_video_frames),
+            .with_max_video_frames(self.config.media.max_video_frames)
+            .with_operator_gateway(operator_gateway),
         );
 
         // Construct local key store for self-hosted provider management
@@ -2448,7 +2440,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         } else {
             // Process attachments (images via vision, audio via STT)
             let attachment_text = attachment_processor
-                .process_attachments(&msg.attachments)
+                .process_attachments(&msg.attachments, attachment_processor.operator_gateway())
                 .await
                 .unwrap_or_default();
 

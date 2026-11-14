@@ -266,10 +266,12 @@ pub async fn process_telegram_message(
         tracing::warn!(error = %e, "failed to store user message");
     }
 
-    // Run session compaction if needed (non-fatal on failure). Telegram users
-    // carry no Omni identity, so memory flushing has a billable gateway client
-    // only on self-hosted instances
-    let memory_ai = crate::api::managed::memory_ai_for(&state, None, None).await;
+    // Telegram users carry no Omni identity, so memory and attachment AI have
+    // a billable gateway client only on self-hosted instances
+    let gateway = crate::api::managed::gateway_client_for(&state, None, None).await;
+    let memory_ai = gateway.clone().map(crate::db::MemoryAi::new);
+
+    // Run session compaction if needed (non-fatal on failure)
     if let Some(ref compactor) = state.session_compactor
         && let Ok(count) = state.session_repo.message_count(&session.id)
         && compactor.needs_compaction(count)
@@ -385,7 +387,7 @@ pub async fn process_telegram_message(
         content.clone()
     } else if let Some(ref ap) = state.attachment_processor {
         let attachment_text = ap
-            .process_attachments(&msg.attachments)
+            .process_attachments(&msg.attachments, gateway.as_ref())
             .await
             .unwrap_or_default();
         if attachment_text.is_empty() {

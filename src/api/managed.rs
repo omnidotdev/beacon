@@ -139,32 +139,42 @@ pub async fn managed_client(
     })
 }
 
-/// Memory AI (embeddings, fact extraction, query condensing) for a turn
+/// The gateway client a turn's auxiliary AI (memory, vision, transcription)
+/// runs on
 ///
-/// Cloud mode always uses the user's product-scoped Beacon key, so memory AI
-/// is charged to the user's Omni credits like chat; without an authenticated
-/// user there is no billable key and memory falls back to keyword search.
-/// Self-hosted instances use the turn's own gateway client (the operator's
-/// gateway and keys). `None` means memory AI is off for this turn
-pub async fn memory_ai_for(
+/// Cloud mode always uses the user's product-scoped Beacon key, so the work is
+/// charged to the user's Omni credits like chat; without an authenticated user
+/// there is no billable key and the caller degrades. Self-hosted instances use
+/// the turn's own gateway client (the operator's gateway and keys). `None`
+/// means auxiliary AI is off for this turn
+pub async fn gateway_client_for(
     state: &ApiState,
     gatekeeper_user_id: Option<&str>,
     turn_client: Option<&Arc<SynapseClient>>,
-) -> Option<MemoryAi> {
+) -> Option<Arc<SynapseClient>> {
     if state.cloud_mode {
         let user_id = gatekeeper_user_id?;
         return managed_synapse_client(state, user_id)
             .await
             .map_err(|e| {
-                tracing::debug!(user_id = %user_id, error = ?e, "memory AI unavailable for this turn");
+                tracing::debug!(user_id = %user_id, error = ?e, "gateway AI unavailable for this turn");
             })
-            .ok()
-            .map(MemoryAi::new);
+            .ok();
     }
 
-    turn_client
-        .cloned()
-        .or_else(|| state.synapse.clone())
+    turn_client.cloned().or_else(|| state.synapse.clone())
+}
+
+/// Memory AI (embeddings, fact extraction, query condensing) for a turn, on
+/// the client [`gateway_client_for`] picks. `None` means memory falls back to
+/// keyword search
+pub async fn memory_ai_for(
+    state: &ApiState,
+    gatekeeper_user_id: Option<&str>,
+    turn_client: Option<&Arc<SynapseClient>>,
+) -> Option<MemoryAi> {
+    gateway_client_for(state, gatekeeper_user_id, turn_client)
+        .await
         .map(MemoryAi::new)
 }
 
