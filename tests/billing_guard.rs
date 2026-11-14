@@ -104,3 +104,53 @@ fn app_id_is_never_configurable_or_synapse() {
             .unwrap();
     assert!(billing.contains("pub const BEACON_APP_ID: &str = \"beacon\";"));
 }
+
+/// Files on the memory AI path (embeddings, fact extraction, query condensing)
+const MEMORY_AI_PATH: &[&str] = &[
+    "src/api/mod.rs",
+    "src/api/managed.rs",
+    "src/api/websocket.rs",
+    "src/api/webhooks/vortex.rs",
+    "src/api/webhooks/telegram/process.rs",
+    "src/agent/runner.rs",
+    "src/context/compaction.rs",
+    "src/db/indexer.rs",
+    "src/db/memory_ai.rs",
+    "src/tools/memory.rs",
+];
+
+#[test]
+fn memory_ai_never_calls_a_provider_directly() {
+    // Memory AI runs through the Synapse gateway on the user's product-scoped
+    // key (cloud) or the operator's gateway (self-host), never on a raw
+    // provider key held by the server
+    let sources = sources();
+    for file in MEMORY_AI_PATH {
+        let (_, text) = sources
+            .iter()
+            .find(|(path, _)| path == file)
+            .unwrap_or_else(|| panic!("{file} is missing: update MEMORY_AI_PATH"));
+        for needle in [
+            "OPENAI_API_KEY",
+            "api.openai.com",
+            "Embedder::new",
+            "Embedder::with_model",
+            "LlmCondenser",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "{file} contains `{needle}`: memory AI must go through the Synapse gateway"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_server_side_openai_embedder_anywhere() {
+    for (path, text) in sources() {
+        assert!(
+            !text.contains("Embedder::new") && !text.contains("LlmCondenser::new"),
+            "{path} builds a direct provider embedder or condenser"
+        );
+    }
+}

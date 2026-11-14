@@ -10,7 +10,7 @@ use std::time::Duration;
 use synapse_client::SynapseClient;
 
 use crate::Result;
-use crate::db::{Indexer, MemoryRepo, SessionRepo};
+use crate::db::{Indexer, MemoryAi, MemoryRepo, SessionRepo};
 
 /// Configuration for session compaction
 #[derive(Debug, Clone)]
@@ -102,7 +102,7 @@ impl SessionCompactor {
         session_id: &str,
         session_repo: &SessionRepo,
         _memory_repo: &MemoryRepo,
-        indexer: Option<&Indexer>,
+        indexer: Option<(&Indexer, &MemoryAi)>,
         user_id: &str,
     ) -> Result<CompactionResult> {
         // Fetch all messages for the session
@@ -174,10 +174,10 @@ impl SessionCompactor {
         // Optionally extract facts to memory
         let mut facts_extracted = 0;
         if self.config.flush_to_memory
-            && let Some(indexer) = indexer
+            && let Some((indexer, ai)) = indexer
         {
             match indexer
-                .index_conversation(user_id, &conversation_text, Some(session_id), None)
+                .index_conversation(ai, user_id, &conversation_text, Some(session_id), None)
                 .await
             {
                 Ok(memories) => {

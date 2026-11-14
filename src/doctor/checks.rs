@@ -122,22 +122,40 @@ pub fn sqlite_health(config: &Config) -> CheckResult {
     }
 }
 
-/// Check if embeddings API key is available
+/// Check how semantic memory (embeddings, indexing) reaches a model
+///
+/// Memory AI always runs through the Synapse gateway: in cloud mode on each
+/// user's product-scoped key (which needs key provisioning configured), on a
+/// self-hosted instance on the operator's gateway
 #[must_use]
-pub fn embeddings_available() -> CheckResult {
-    if std::env::var("OPENAI_API_KEY").is_ok() {
-        CheckResult {
-            name: "EmbeddingsAvailable",
+pub fn memory_ai_route(config: &Config) -> CheckResult {
+    if !config.cloud_mode {
+        return CheckResult {
+            name: "MemoryAi",
             status: CheckStatus::Ok,
-            message: "OPENAI_API_KEY set (embeddings enabled)".to_string(),
+            message: format!(
+                "semantic memory runs through the Synapse gateway at {}",
+                config.synapse_url
+            ),
+            suggestion: None,
+        };
+    }
+
+    if config.synapse_api_url.is_some() && config.synapse_gateway_secret.is_some() {
+        CheckResult {
+            name: "MemoryAi",
+            status: CheckStatus::Ok,
+            message: "semantic memory runs on each user's product-scoped Synapse key".to_string(),
             suggestion: None,
         }
     } else {
         CheckResult {
-            name: "EmbeddingsAvailable",
+            name: "MemoryAi",
             status: CheckStatus::Warning,
-            message: "OPENAI_API_KEY not set (semantic memory disabled)".to_string(),
-            suggestion: Some("set OPENAI_API_KEY for memory and knowledge features".to_string()),
+            message: "key provisioning not configured (semantic memory disabled)".to_string(),
+            suggestion: Some(
+                "set SYNAPSE_API_URL and SYNAPSE_GATEWAY_SECRET for managed AI".to_string(),
+            ),
         }
     }
 }

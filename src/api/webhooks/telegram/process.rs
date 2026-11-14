@@ -266,7 +266,10 @@ pub async fn process_telegram_message(
         tracing::warn!(error = %e, "failed to store user message");
     }
 
-    // Run session compaction if needed (non-fatal on failure)
+    // Run session compaction if needed (non-fatal on failure). Telegram users
+    // carry no Omni identity, so memory flushing has a billable gateway client
+    // only on self-hosted instances
+    let memory_ai = crate::api::managed::memory_ai_for(&state, None, None).await;
     if let Some(ref compactor) = state.session_compactor
         && let Ok(count) = state.session_repo.message_count(&session.id)
         && compactor.needs_compaction(count)
@@ -275,7 +278,7 @@ pub async fn process_telegram_message(
                 &session.id,
                 &state.session_repo,
                 &state.memory_repo,
-                state.indexer.as_deref(),
+                state.indexer.as_deref().zip(memory_ai.as_ref()),
                 &user.id,
             )
             .await

@@ -306,22 +306,30 @@ async fn handle_socket(
     // Trigger end-of-conversation indexing (best-effort)
     if let Some(indexer) = state_for_cleanup.indexer.clone() {
         let sid = session_id.clone();
+        let gk_user_id = gatekeeper_user_id.clone();
         let uid = gatekeeper_user_id
             .clone()
             .unwrap_or_else(|| session_id.clone());
-        let session_repo = state_for_cleanup.session_repo.clone();
+        let state = Arc::clone(&state_for_cleanup);
         tokio::spawn(async move {
-            let messages = session_repo.get_messages(&sid, 50).unwrap_or_default();
+            let messages = state
+                .session_repo
+                .get_messages(&sid, 50)
+                .unwrap_or_default();
             if messages.len() < 2 {
                 return;
             }
+            let Some(ai) = super::managed::memory_ai_for(&state, gk_user_id.as_deref(), None).await
+            else {
+                return;
+            };
             let conversation: String = messages
                 .iter()
                 .map(|m| format!("{}: {}", m.role.as_display_str(), m.content))
                 .collect::<Vec<_>>()
                 .join("\n");
             if let Err(e) = indexer
-                .index_conversation(&uid, &conversation, Some(&sid), Some("web"))
+                .index_conversation(&ai, &uid, &conversation, Some(&sid), Some("web"))
                 .await
             {
                 tracing::warn!(error = %e, "end-of-conversation indexing failed");
@@ -483,81 +491,6 @@ async fn handle_chat_message(
         crate::api::ApiServer::context_config(&active_persona_id, active_system_prompt);
     let context_builder = ContextBuilder::new(context_config);
 
-    // Embed user message for semantic memory retrieval when embedder is available
-    let query_embedding = if let Some(ref embedder) = state.embedder {
-        match embedder.embed(content).await {
-            Ok(emb) => Some(emb),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to embed user message for semantic retrieval");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut built_context = context_builder.build_with_semantic_memory(
-        &session.id,
-        &user_id,
-        user.life_json_path.as_deref(),
-        &state.session_repo,
-        &state.user_repo,
-        Some(&state.memory_repo),
-        query_embedding.as_deref(),
-    );
-
-    // Inject knowledge based on conversation context + embeddings
-    if let Ok(ref mut ctx) = built_context
-        && !state.persona_knowledge.is_empty()
-    {
-        // Build multi-turn retrieval query from recent session history
-        let prior_texts: Vec<String> = state
-            .session_repo
-            .get_messages(&session.id, 4)
-            .unwrap_or_default()
-            .into_iter()
-            .rev()
-            .filter(|m| m.role == crate::db::MessageRole::User)
-            .skip(1) // skip current (already in `content`)
-            .take(3)
-            .map(|m| m.content)
-            .collect();
-        let prior_refs: Vec<&str> = prior_texts.iter().map(String::as_str).collect();
-        let retrieval_query = agent_core::knowledge::build_retrieval_query_condensed(
-            content,
-            &prior_refs,
-            3,
-            state.condenser.as_deref(),
-        )
-        .await;
-
-        let max_knowledge_tokens = state.max_context_tokens / 4;
-        let selected = if let Some(ref reranker) = state.reranker {
-            agent_core::knowledge::select_knowledge_reranked(
-                &state.persona_knowledge,
-                &retrieval_query,
-                query_embedding.as_deref(),
-                reranker.as_ref(),
-                max_knowledge_tokens,
-            )
-            .await
-        } else {
-            crate::knowledge::select_knowledge_with_embeddings(
-                &state.persona_knowledge,
-                &retrieval_query,
-                query_embedding.as_deref(),
-                max_knowledge_tokens,
-            )
-        };
-        if !selected.is_empty() {
-            ctx.knowledge_context = crate::knowledge::format_knowledge(&selected);
-        }
-    }
-
-    // Build augmented prompt
-    let augmented_prompt = built_context
-        .as_ref()
-        .map_or_else(|_| content.to_string(), |ctx| ctx.format_prompt(content));
-
     // Resolve Synapse client for this user (BYOK or product-scoped managed key)
     let (synapse_to_use, model_override) = if let (Some(gk_user_id), Some(resolver)) =
         (&gatekeeper_user_id, &state.key_resolver)
@@ -619,6 +552,89 @@ async fn handle_chat_message(
             .map_err(|_| crate::Error::Config("channel closed".to_string()))?;
         return Ok(());
     };
+
+    // Memory AI for this turn runs through the gateway (the user's
+    // product-scoped key in cloud mode); without it memory is keyword-only
+    let memory_ai = super::managed::memory_ai_for(state, gatekeeper_user_id, Some(&synapse)).await;
+
+    // Embed user message for semantic memory retrieval (best-effort)
+    let query_embedding = if let Some(ref ai) = memory_ai {
+        match ai.embed(content).await {
+            Ok(emb) => Some(emb),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to embed user message for semantic retrieval");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut built_context = context_builder.build_with_semantic_memory(
+        &session.id,
+        &user_id,
+        user.life_json_path.as_deref(),
+        &state.session_repo,
+        &state.user_repo,
+        Some(&state.memory_repo),
+        query_embedding.as_deref(),
+    );
+
+    // Inject knowledge based on conversation context + embeddings
+    if let Ok(ref mut ctx) = built_context
+        && !state.persona_knowledge.is_empty()
+    {
+        // Build multi-turn retrieval query from recent session history
+        let prior_texts: Vec<String> = state
+            .session_repo
+            .get_messages(&session.id, 4)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .filter(|m| m.role == crate::db::MessageRole::User)
+            .skip(1) // skip current (already in `content`)
+            .take(3)
+            .map(|m| m.content)
+            .collect();
+        let prior_refs: Vec<&str> = prior_texts.iter().map(String::as_str).collect();
+        let retrieval_query = agent_core::knowledge::build_retrieval_query_condensed(
+            content,
+            &prior_refs,
+            3,
+            state.condenser.as_deref().or_else(|| {
+                memory_ai
+                    .as_ref()
+                    .map(|ai| ai as &dyn agent_core::knowledge::QueryCondenser)
+            }),
+        )
+        .await;
+
+        let max_knowledge_tokens = state.max_context_tokens / 4;
+        let selected = if let Some(ref reranker) = state.reranker {
+            agent_core::knowledge::select_knowledge_reranked(
+                &state.persona_knowledge,
+                &retrieval_query,
+                query_embedding.as_deref(),
+                reranker.as_ref(),
+                max_knowledge_tokens,
+            )
+            .await
+        } else {
+            crate::knowledge::select_knowledge_with_embeddings(
+                &state.persona_knowledge,
+                &retrieval_query,
+                query_embedding.as_deref(),
+                max_knowledge_tokens,
+            )
+        };
+        if !selected.is_empty() {
+            ctx.knowledge_context = crate::knowledge::format_knowledge(&selected);
+        }
+    }
+
+    // Build augmented prompt
+    let augmented_prompt = built_context
+        .as_ref()
+        .map_or_else(|_| content.to_string(), |ctx| ctx.format_prompt(content));
 
     let model = msg_model_override
         .or(model_override)
@@ -736,6 +752,7 @@ async fn handle_chat_message(
         user_id: user_id.clone(),
         notify: Some(notify_tx),
         synapse_override: Some(synapse),
+        memory_ai: memory_ai.clone(),
     };
 
     // Spawn keepalive heartbeat to prevent proxy timeout during LLM processing.
@@ -824,14 +841,21 @@ async fn handle_chat_message(
         .map_err(|_| crate::Error::Config("channel closed".to_string()))?;
 
     // Post-turn background fact extraction — fire-and-forget, never blocks the response
-    if let Some(indexer) = state.indexer.clone() {
+    if let (Some(indexer), Some(ai)) = (state.indexer.clone(), memory_ai) {
         let uid = user_id.clone();
         let user_msg = content.to_string();
         let assistant_msg = full_response.clone();
         let sid = session.id.clone();
         tokio::spawn(async move {
             if let Err(e) = indexer
-                .index_message(&uid, &user_msg, &assistant_msg, Some(&sid), Some("web"))
+                .index_message(
+                    &ai,
+                    &uid,
+                    &user_msg,
+                    &assistant_msg,
+                    Some(&sid),
+                    Some("web"),
+                )
                 .await
             {
                 tracing::warn!(error = %e, user_id = %uid, "post-turn indexing failed");

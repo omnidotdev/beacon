@@ -42,8 +42,7 @@ use crate::canvas::Canvas;
 use crate::channels::{TeamsChannel, TelegramAccountRegistry, TelegramChannel};
 use crate::context::ContextConfig;
 use crate::db::{
-    DbPool, Embedder, Indexer, MemoryRepo, SessionRepo, SkillRepo, TelegramGroupConfigRepo,
-    UserRepo,
+    DbPool, Indexer, MemoryRepo, SessionRepo, SkillRepo, TelegramGroupConfigRepo, UserRepo,
 };
 use crate::hooks::HookManager;
 use crate::nodes::NodeRegistry;
@@ -86,11 +85,8 @@ pub struct ApiState {
     pub session_repo: SessionRepo,
     pub user_repo: UserRepo,
     pub memory_repo: MemoryRepo,
-    /// Text embedder for semantic memory search.
-    /// Present only when `OPENAI_API_KEY` is set.
-    pub embedder: Option<Arc<Embedder>>,
-    /// Conversation indexer for post-turn memory extraction.
-    /// Present only when `OPENAI_API_KEY` is set.
+    /// Conversation indexer for post-turn memory extraction. Its model calls
+    /// run on the turn's memory AI client (see `api::memory`)
     pub indexer: Option<Arc<Indexer>>,
     pub skill_repo: SkillRepo,
     pub tool_policy: Arc<ToolPolicy>,
@@ -562,34 +558,11 @@ impl ApiServerBuilder {
         let telegram_group_repo = TelegramGroupConfigRepo::new(self.db.clone());
         let usage_repo = crate::db::UsageRepo::new(self.db.clone());
 
-        // Create embedder and indexer if OPENAI_API_KEY is set
-        let openai_key = std::env::var("OPENAI_API_KEY").ok();
-
-        let embedder = openai_key
-            .as_deref()
-            .and_then(|key| Embedder::new(key.to_string()).ok())
-            .map(Arc::new);
-
-        let indexer = embedder
-            .as_ref()
-            .zip(openai_key.as_deref())
-            .map(|(emb, key)| {
-                Arc::new(Indexer::new(
-                    (**emb).clone(),
-                    memory_repo.clone(),
-                    key.to_string(),
-                ))
-            });
-
-        // Create query condenser from builder or auto-detect from OpenAI key
-        let condenser: Option<Arc<dyn agent_core::knowledge::QueryCondenser>> =
-            self.condenser.or_else(|| {
-                openai_key.as_deref().and_then(|key| {
-                    agent_core::knowledge::LlmCondenser::new(key.to_string())
-                        .ok()
-                        .map(|c| Arc::new(c) as Arc<dyn agent_core::knowledge::QueryCondenser>)
-                })
-            });
+        // Memory AI (embeddings, fact extraction, query condensing) runs per
+        // turn through the Synapse gateway on the user's client, never on a
+        // provider key held by the server
+        let indexer = Some(Arc::new(Indexer::new(memory_repo.clone())));
+        let condenser = self.condenser;
         let manifold_url = self
             .manifold_url
             .unwrap_or_else(|| "https://api.manifold.omni.dev".to_string());
@@ -645,7 +618,6 @@ impl ApiServerBuilder {
             session_repo,
             user_repo,
             memory_repo,
-            embedder,
             indexer,
             skill_repo,
             tool_policy: self.tool_policy,
@@ -843,10 +815,9 @@ impl ApiServer {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn api_state_has_embedder_and_indexer_fields() {
-        // Compile-time assertion: these fields must exist on ApiState
+    fn api_state_has_indexer_field() {
+        // Compile-time assertion: this field must exist on ApiState
         fn _check(state: &crate::api::ApiState) {
-            let _: &Option<std::sync::Arc<crate::db::Embedder>> = &state.embedder;
             let _: &Option<std::sync::Arc<crate::db::Indexer>> = &state.indexer;
         }
     }

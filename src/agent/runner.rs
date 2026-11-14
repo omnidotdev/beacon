@@ -33,6 +33,9 @@ pub struct AgentRunConfig {
     /// Per-request Synapse client override (BYOK or local key store)
     /// Falls back to `state.synapse` when `None`
     pub synapse_override: Option<Arc<synapse_client::SynapseClient>>,
+    /// Memory AI for the memory tools (gateway embeddings); `None` keeps
+    /// memory search keyword-only
+    pub memory_ai: Option<crate::db::MemoryAi>,
 }
 
 /// In-progress tool call being assembled from streaming events
@@ -100,7 +103,7 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
 
     let memory_tools = Arc::new(crate::tools::BuiltinMemoryTools::new(
         state.memory_repo.clone(),
-        state.embedder.clone(),
+        config.memory_ai.clone(),
         config.user_id.clone(),
     ));
 
@@ -406,6 +409,7 @@ mod tests {
             user_id: "user_1".to_string(),
             notify: None,
             synapse_override: None,
+            memory_ai: None,
         };
         assert!(config.prompt.is_empty());
     }
