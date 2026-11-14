@@ -69,11 +69,38 @@ pub fn billing_entity_for(user_id: &str) -> BillingEntity {
 }
 
 /// Base URL of the Synapse gateway managed requests go to
-fn synapse_base_url(state: &ApiState) -> String {
+pub(crate) fn synapse_base_url(state: &ApiState) -> String {
     state.synapse.as_ref().map_or_else(
         || "http://localhost:6000".to_string(),
         |c| c.base_url().to_string(),
     )
+}
+
+/// The user's product-scoped Beacon key
+///
+/// # Errors
+///
+/// Returns [`ManagedError`] when no product-scoped key can be provisioned
+pub async fn managed_gateway_key(
+    state: &ApiState,
+    user_id: &str,
+) -> Result<Arc<str>, ManagedError> {
+    let Some(provisioner) = &state.key_provisioner else {
+        tracing::warn!(user_id = %user_id, "managed AI requested but no key provisioner configured");
+        return Err(ManagedError::Unavailable);
+    };
+
+    let entity = billing_entity_for(user_id);
+    provisioner
+        .managed_key(user_id, &entity)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, user_id = %user_id, "managed key provisioning failed");
+            match e {
+                ProvisionError::Denied(_) => ManagedError::Denied,
+                ProvisionError::Unavailable(_) => ManagedError::Unavailable,
+            }
+        })
 }
 
 /// Build a gateway client on the user's product-scoped Beacon key
@@ -86,22 +113,7 @@ pub async fn managed_synapse_client(
     state: &ApiState,
     user_id: &str,
 ) -> Result<Arc<SynapseClient>, ManagedError> {
-    let Some(provisioner) = &state.key_provisioner else {
-        tracing::warn!(user_id = %user_id, "managed AI requested but no key provisioner configured");
-        return Err(ManagedError::Unavailable);
-    };
-
-    let entity = billing_entity_for(user_id);
-    let key = provisioner
-        .managed_key(user_id, &entity)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, user_id = %user_id, "managed key provisioning failed");
-            match e {
-                ProvisionError::Denied(_) => ManagedError::Denied,
-                ProvisionError::Unavailable(_) => ManagedError::Unavailable,
-            }
-        })?;
+    let key = managed_gateway_key(state, user_id).await?;
 
     let base_url = synapse_base_url(state);
     let client = SynapseClient::new(&base_url)

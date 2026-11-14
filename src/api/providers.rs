@@ -15,6 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
+use crate::providers::gateway_models::{ModelsResponse, fetch_gateway_models, picker_response};
 
 /// Available LLM provider types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,7 +188,7 @@ async fn list_providers(
         ProviderInfo {
             id: ProviderType::Openai,
             name: "OpenAI".to_string(),
-            description: "GPT-4o, GPT-4, and other OpenAI models".to_string(),
+            description: "GPT and other OpenAI models".to_string(),
             status: openai_status,
             active: preferred_provider.as_deref() == Some("openai"),
             api_key_url: Some("https://platform.openai.com/api-keys".to_string()),
@@ -201,7 +202,7 @@ async fn list_providers(
         ProviderInfo {
             id: ProviderType::Anthropic,
             name: "Anthropic".to_string(),
-            description: "Claude Opus 4.5, Sonnet 4.5, and other Claude models".to_string(),
+            description: "Claude Opus, Sonnet, and Haiku models".to_string(),
             status: anthropic_status,
             active: preferred_provider.as_deref() == Some("anthropic"),
             api_key_url: Some("https://console.anthropic.com/settings/keys".to_string()),
@@ -246,15 +247,14 @@ async fn list_providers(
             ProviderInfo {
                 id: ProviderType::OmniCredits,
                 name: "Omni Credits".to_string(),
-                description: "Omni's AI router with smart model selection and MCP support. No API keys needed".to_string(),
+                description: "Omni's AI gateway with current Claude models and MCP support. No API keys needed".to_string(),
                 status: omni_status,
                 active: preferred_provider.as_deref() == Some("omni_credits"),
                 api_key_url: None,
                 coming_soon: omni_coming_soon,
                 features: vec![
-                    "Smart routing".to_string(),
+                    "Claude Haiku, Sonnet, and Opus".to_string(),
                     "MCP server aggregation".to_string(),
-                    "Cost optimization".to_string(),
                     "Tool discovery".to_string(),
                 ],
             }
@@ -298,6 +298,70 @@ async fn list_providers(
         providers,
         active_provider,
     })
+}
+
+/// Error body the app reads (`error.code`, `error.message`)
+fn models_error(
+    status: axum::http::StatusCode,
+    code: &str,
+    message: &str,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// Managed models the signed-in user may pick, from the Synapse gateway's
+/// Beacon policy, with the default marked for the user's plan
+///
+/// Cloud mode only: managed AI runs on the user's product-scoped key there.
+/// Elsewhere there are no managed models and the list is empty
+async fn list_models(
+    headers: HeaderMap,
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ModelsResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    use axum::http::StatusCode;
+
+    if !state.cloud_mode {
+        return Ok(Json(ModelsResponse::empty()));
+    }
+
+    let Some(user_id) = extract_user_id(&headers, &state).await else {
+        return Err(models_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Sign in to see the available models",
+        ));
+    };
+
+    let key = super::managed::managed_gateway_key(&state, &user_id)
+        .await
+        .map_err(|e| {
+            let status = match e {
+                super::managed::ManagedError::Denied => StatusCode::FORBIDDEN,
+                super::managed::ManagedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            models_error(status, e.code(), &e.user_message())
+        })?;
+
+    let base_url = super::managed::synapse_base_url(&state);
+    let models = fetch_gateway_models(&base_url, &key).await.map_err(|e| {
+        tracing::warn!(error = %e, user_id = %user_id, "gateway model listing failed");
+        let failure = super::managed::ManagedError::Unavailable;
+        models_error(
+            StatusCode::BAD_GATEWAY,
+            failure.code(),
+            &failure.user_message(),
+        )
+    })?;
+
+    let tier = match state.billing_state.as_ref() {
+        Some(billing) => billing.user_tier(&user_id).await,
+        None => crate::billing::PlanTier::Free,
+    };
+
+    Ok(Json(picker_response(models, tier, &state.llm_model)))
 }
 
 /// Configure a provider key locally (self-hosted deployments)
@@ -447,6 +511,7 @@ async fn remove_provider(
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/", get(list_providers))
+        .route("/models", get(list_models))
         .route("/configure", post(configure_provider))
         .route("/{provider}", delete(remove_provider))
         .with_state(state)

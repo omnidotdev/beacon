@@ -1,13 +1,18 @@
 //! Plan tier resolution from Aether entitlements
 //!
 //! Beacon's managed default model follows the user's plan: the free tier
-//! defaults to a Haiku-class model, paid tiers keep the configured default.
-//! The user can still pick any model explicitly; credits bound the spend
+//! sends the gateway's virtual `auto` model, which the Synapse gateway resolves
+//! to Beacon's policy default (a Haiku-class model), and paid tiers keep the
+//! configured default. The user can still pick any model the gateway lists for
+//! Beacon; credits bound the spend
 
 use synapse_billing::types::EntitlementsResponse;
 
-/// Default managed model for the free tier
-pub const FREE_TIER_MODEL: &str = "anthropic/claude-haiku-5-5";
+/// Virtual model the gateway resolves to Beacon's policy default model.
+///
+/// The free tier sends it instead of a pinned id, so the gateway's beacon
+/// policy (not a constant here) decides the free default
+pub const GATEWAY_DEFAULT_MODEL: &str = "auto";
 
 /// Entitlement feature key carrying the plan tier
 const TIER_FEATURE_KEY: &str = "tier";
@@ -26,7 +31,7 @@ impl PlanTier {
     #[must_use]
     pub fn default_model(self, paid_default: &str) -> String {
         match self {
-            Self::Free => FREE_TIER_MODEL.to_string(),
+            Self::Free => GATEWAY_DEFAULT_MODEL.to_string(),
             Self::Paid => paid_default.to_string(),
         }
     }
@@ -71,14 +76,11 @@ mod tests {
     }
 
     #[test]
-    fn free_tier_defaults_to_haiku() {
+    fn free_tier_defers_to_the_gateway_default() {
         let r = response(serde_json::json!([{ "featureKey": "tier", "value": "free" }]));
         let tier = tier_from_entitlements(&r);
         assert_eq!(tier, PlanTier::Free);
-        assert_eq!(
-            tier.default_model("anthropic/claude-sonnet-5-5"),
-            "anthropic/claude-haiku-5-5"
-        );
+        assert_eq!(tier.default_model("anthropic/claude-sonnet-5-5"), "auto");
     }
 
     #[test]
