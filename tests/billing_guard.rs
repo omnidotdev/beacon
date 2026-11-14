@@ -154,3 +154,27 @@ fn no_server_side_openai_embedder_anywhere() {
         );
     }
 }
+
+#[test]
+fn no_direct_provider_api_calls() {
+    // Managed AI (chat, memory, vision, transcription) runs through a Synapse
+    // gateway that meters it; only the embedded gateway's own provider config
+    // may name a provider endpoint
+    let hosts = [
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+        "api.deepgram.com",
+    ];
+    for (path, text) in sources() {
+        if path == "src/config/synapse_bridge.rs" {
+            continue;
+        }
+        for host in hosts {
+            assert!(
+                !text.contains(host),
+                "{path} calls `{host}` directly: route it through the Synapse gateway"
+            );
+        }
+    }
+}

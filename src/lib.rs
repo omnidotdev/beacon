@@ -48,7 +48,6 @@ pub mod knowledge;
 pub mod lifecycle;
 pub mod links;
 pub mod mcp;
-pub mod media;
 pub mod nodes;
 pub mod persona;
 pub mod plugins;
