@@ -1,10 +1,8 @@
 //! Built-in memory management tools for the LLM
 
-use std::sync::Arc;
-
 use agent_core::tools::{ToolKind, ToolProvider};
 
-use crate::db::{Embedder, Memory, MemoryCategory, MemoryRepo};
+use crate::db::{Memory, MemoryAi, MemoryCategory, MemoryRepo};
 use crate::{Error, Result};
 
 /// Built-in memory tools for LLM direct memory management
@@ -14,7 +12,7 @@ use crate::{Error, Result};
 /// `agent_core::memory::MemoryStore` for shared interface compatibility.
 pub struct BuiltinMemoryTools {
     memory_repo: MemoryRepo,
-    embedder: Option<Arc<Embedder>>,
+    memory_ai: Option<MemoryAi>,
     user_id: String,
 }
 
@@ -23,12 +21,12 @@ impl BuiltinMemoryTools {
     #[must_use]
     pub const fn new(
         memory_repo: MemoryRepo,
-        embedder: Option<Arc<Embedder>>,
+        memory_ai: Option<MemoryAi>,
         user_id: String,
     ) -> Self {
         Self {
             memory_repo,
-            embedder,
+            memory_ai,
             user_id,
         }
     }
@@ -145,9 +143,9 @@ impl BuiltinMemoryTools {
 
         let mut memory = Memory::new(self.user_id.clone(), category, args.content.clone());
 
-        // Embed if embedder available (best-effort: log and continue without)
-        if let Some(ref embedder) = self.embedder {
-            match embedder.embed(&args.content).await {
+        // Embed through the gateway when available (best-effort: log and continue without)
+        if let Some(ref ai) = self.memory_ai {
+            match ai.embed(&args.content).await {
                 Ok(embedding) => {
                     memory = memory.with_embedding(embedding);
                 }
@@ -183,8 +181,8 @@ impl BuiltinMemoryTools {
         let args: SearchArgs = serde_json::from_str(arguments)
             .map_err(|e| Error::Tool(format!("memory_search: invalid arguments: {e}")))?;
 
-        let memories = if let Some(ref embedder) = self.embedder {
-            match embedder.embed(&args.query).await {
+        let memories = if let Some(ref ai) = self.memory_ai {
+            match ai.embed(&args.query).await {
                 Ok(embedding) => self.memory_repo.search_hybrid(
                     &self.user_id,
                     &args.query,

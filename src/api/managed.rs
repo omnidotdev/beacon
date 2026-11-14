@@ -13,6 +13,7 @@ use super::ApiState;
 use crate::billing::gateway_error::{
     self, CODE_AI_UNAVAILABLE, GatewayFailure, UNAVAILABLE_MESSAGE,
 };
+use crate::db::MemoryAi;
 use crate::providers::provisioner::{BillingEntity, ProvisionError};
 
 /// Error code when the account lacks the `api_access` entitlement
@@ -75,16 +76,16 @@ fn synapse_base_url(state: &ApiState) -> String {
     )
 }
 
-/// Build the user's managed Synapse client
+/// Build a gateway client on the user's product-scoped Beacon key
 ///
 /// # Errors
 ///
 /// Returns [`ManagedError`] when no product-scoped key can be provisioned;
 /// callers must surface it rather than fall back to another client
-pub async fn managed_client(
+pub async fn managed_synapse_client(
     state: &ApiState,
     user_id: &str,
-) -> Result<ManagedClient, ManagedError> {
+) -> Result<Arc<SynapseClient>, ManagedError> {
     let Some(provisioner) = &state.key_provisioner else {
         tracing::warn!(user_id = %user_id, "managed AI requested but no key provisioner configured");
         return Err(ManagedError::Unavailable);
@@ -110,6 +111,21 @@ pub async fn managed_client(
         })?
         .with_api_key(key.to_string());
 
+    Ok(Arc::new(client))
+}
+
+/// Build the user's managed Synapse client
+///
+/// # Errors
+///
+/// Returns [`ManagedError`] when no product-scoped key can be provisioned;
+/// callers must surface it rather than fall back to another client
+pub async fn managed_client(
+    state: &ApiState,
+    user_id: &str,
+) -> Result<ManagedClient, ManagedError> {
+    let client = managed_synapse_client(state, user_id).await?;
+
     let default_model = crate::billing::default_model_for_user(
         state.billing_state.as_ref(),
         user_id,
@@ -118,9 +134,38 @@ pub async fn managed_client(
     .await;
 
     Ok(ManagedClient {
-        client: Arc::new(client),
+        client,
         default_model,
     })
+}
+
+/// Memory AI (embeddings, fact extraction, query condensing) for a turn
+///
+/// Cloud mode always uses the user's product-scoped Beacon key, so memory AI
+/// is charged to the user's Omni credits like chat; without an authenticated
+/// user there is no billable key and memory falls back to keyword search.
+/// Self-hosted instances use the turn's own gateway client (the operator's
+/// gateway and keys). `None` means memory AI is off for this turn
+pub async fn memory_ai_for(
+    state: &ApiState,
+    gatekeeper_user_id: Option<&str>,
+    turn_client: Option<&Arc<SynapseClient>>,
+) -> Option<MemoryAi> {
+    if state.cloud_mode {
+        let user_id = gatekeeper_user_id?;
+        return managed_synapse_client(state, user_id)
+            .await
+            .map_err(|e| {
+                tracing::debug!(user_id = %user_id, error = ?e, "memory AI unavailable for this turn");
+            })
+            .ok()
+            .map(MemoryAi::new);
+    }
+
+    turn_client
+        .cloned()
+        .or_else(|| state.synapse.clone())
+        .map(MemoryAi::new)
 }
 
 /// React to a gateway refusal on a managed request: a rejected key is

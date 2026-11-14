@@ -362,6 +362,13 @@ async fn handle_agent_run(state: &ApiState, callback: &VortexCallback) -> crate:
         (None, state.llm_model.clone())
     };
 
+    let memory_ai = crate::api::managed::memory_ai_for(
+        state,
+        Some(&payload.user_id),
+        synapse_override.as_ref(),
+    )
+    .await;
+
     let agent_config = AgentRunConfig {
         prompt: augmented_prompt,
         system_prompt,
@@ -372,6 +379,7 @@ async fn handle_agent_run(state: &ApiState, callback: &VortexCallback) -> crate:
         user_id: user.id.clone(),
         notify: None,
         synapse_override,
+        memory_ai,
     };
 
     // A gateway refusal (out of credits, unavailable) is delivered to the

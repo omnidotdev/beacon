@@ -46,7 +46,6 @@ fn build_test_router(db: DbPool) -> axum::Router {
         session_repo,
         user_repo,
         memory_repo,
-        embedder: None,
         indexer: None,
         skill_repo,
         tool_policy,

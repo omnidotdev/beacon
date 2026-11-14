@@ -75,8 +75,13 @@ With `BEACON_CLOUD_MODE=true` (the hosted deployment), Beacon requires a Gatekee
 - There is no shared-key fallback: if a managed key cannot be provisioned, AI is reported as unavailable
 - The free tier defaults to `anthropic/claude-haiku-5-5`; paid tiers default to `BEACON_LLM_MODEL` (`anthropic/claude-sonnet-5-5`). The tier comes from Aether entitlements
 - Entitlements (`api_access`, `voice_enabled`) are enforced via Aether when `BILLING_BASE_URL` and `BILLING_SERVICE_API_KEY` are set
+- Semantic memory (embeddings via `openai/text-embedding-3-small`, fact extraction and retrieval query rewriting via `anthropic/claude-haiku-5-5`) runs through the gateway on the same per-user key, so it is charged to the user's credits like chat. A refused or failed memory call never blocks a reply: memory search falls back to keyword search and indexing is skipped
 
 BYOK keys and self-hosted mode are unaffected.
+
+## Semantic memory
+
+Memory embeddings, fact extraction, and query rewriting always go through a Synapse gateway, never a provider API directly. In cloud mode they use each user's product-scoped key (see above); a self-hosted instance uses its own gateway (`SYNAPSE_URL`) with the operator's provider keys. Without a reachable gateway, memory falls back to keyword search.
 
 ## Development
 
