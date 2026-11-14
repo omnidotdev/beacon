@@ -356,15 +356,20 @@ impl Daemon {
             (None, None)
         };
 
-        // Initialize key provisioner if Synapse API is configured
+        // Initialize product-scoped key provisioner if Synapse API is configured
         let key_provisioner = if let (Some(api_url), Some(secret)) = (
             &self.config.synapse_api_url,
             &self.config.synapse_gateway_secret,
         ) {
-            tracing::info!(url = %api_url, "key provisioning enabled via Synapse API");
+            tracing::info!(
+                url = %api_url,
+                app_id = crate::billing::BEACON_APP_ID,
+                "product-scoped key provisioning enabled via Synapse API"
+            );
             Some(Arc::new(crate::providers::KeyProvisioner::new(
                 api_url.clone(),
                 secret.clone(),
+                crate::billing::BEACON_APP_ID,
             )))
         } else {
             None
@@ -2302,7 +2307,6 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                 adapter_registry: &adapter_registry,
                 harness_session_repo: &harness_session_repo,
                 session_repo: &session_repo,
-                usage_recorder: None,
                 usage_repo: None,
             };
             match crate::agent::harness::run_harness_turn(
@@ -2313,7 +2317,6 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                 channel_name,
                 &msg.channel_id,
                 &session.id,
-                &user.id,
             )
             .await
             {
@@ -2811,8 +2814,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                         Err(e) => {
                             tracing::error!(error = %e, "synapse stream error");
                             final_response =
-                                "Sorry, I encountered an error processing your message."
-                                    .to_string();
+                                crate::billing::gateway_error::channel_reply(&e.to_string());
                             break;
                         }
                     }
@@ -2921,8 +2923,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
                         Err(e) => {
                             tracing::error!(error = %e, "synapse error");
                             final_response =
-                                "Sorry, I encountered an error processing your message."
-                                    .to_string();
+                                crate::billing::gateway_error::channel_reply(&e.to_string());
                             break;
                         }
                     }

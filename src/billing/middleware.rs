@@ -1,7 +1,11 @@
 //! Aether entitlement middleware
 //!
-//! Enforces subscription entitlements and usage limits before processing
-//! AI requests. Skips checks for unauthenticated or non-JWT requests.
+//! Enforces feature entitlements before processing AI requests. Skips checks
+//! for unauthenticated or non-JWT requests.
+//!
+//! Spend is bounded by credits, which the Synapse gateway checks (402 before
+//! spend) and deducts for every managed request, so there is no message or
+//! request quota here
 
 use std::sync::Arc;
 
@@ -15,8 +19,6 @@ use crate::api::jwt::JwksCache;
 
 const FEATURE_KEY_API_ACCESS: &str = "api_access";
 const FEATURE_KEY_VOICE_ENABLED: &str = "voice_enabled";
-const METER_KEY_REQUESTS: &str = "requests";
-const METER_KEY_MESSAGES: &str = "messages";
 const METER_KEY_CONVERSATIONS: &str = "conversations";
 
 /// Extract a Bearer token from the Authorization header
@@ -28,11 +30,11 @@ fn extract_bearer(req: &Request) -> Option<String> {
         .map(String::from)
 }
 
-/// Enforce Aether entitlements and usage limits.
+/// Enforce Aether entitlements.
 ///
 /// 1. Extracts and validates the Bearer JWT.
 /// 2. Checks `api_access` entitlement → 403 if denied.
-/// 3. Checks usage limit for `requests` meter → 429 if exceeded.
+/// 3. Checks `voice_enabled` for voice endpoints → 403 if denied.
 /// 4. Passes through if all checks pass.
 ///
 /// Skips checks when:
@@ -75,32 +77,6 @@ pub async fn billing_middleware(
             return (
                 StatusCode::FORBIDDEN,
                 "API access not granted for this account",
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return handle_aether_error(&billing.fail_mode, e, request, next).await;
-        }
-    }
-
-    // Check requests usage limit → 429 if exceeded
-    match check_usage(&billing, entity_type, entity_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (StatusCode::TOO_MANY_REQUESTS, "usage limit exceeded").into_response();
-        }
-        Err(e) => {
-            return handle_aether_error(&billing.fail_mode, e, request, next).await;
-        }
-    }
-
-    // Check messages usage limit → 429 if exceeded
-    match check_messages_usage(&billing, entity_type, entity_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "monthly message limit exceeded",
             )
                 .into_response();
         }
@@ -160,70 +136,6 @@ async fn check_entitlement(
     );
 
     Ok(response.has_access)
-}
-
-/// Check the `requests` usage meter, using cache when available
-async fn check_usage(
-    state: &BillingState,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<bool, synapse_billing::BillingError> {
-    // Check cache first
-    if let Some(cached) = state
-        .cache
-        .get_usage(entity_type, entity_id, METER_KEY_REQUESTS)
-    {
-        return Ok(cached.allowed);
-    }
-
-    // Cache miss — call Aether
-    let response = state
-        .client
-        .check_usage(entity_type, entity_id, METER_KEY_REQUESTS, 1.0)
-        .await?;
-
-    state.cache.put_usage(
-        entity_type,
-        entity_id,
-        METER_KEY_REQUESTS,
-        CachedUsage {
-            allowed: response.allowed,
-        },
-    );
-
-    Ok(response.allowed)
-}
-
-/// Check the `messages` usage meter, using cache when available
-async fn check_messages_usage(
-    state: &BillingState,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<bool, synapse_billing::BillingError> {
-    // Check cache first
-    if let Some(cached) = state
-        .cache
-        .get_usage(entity_type, entity_id, METER_KEY_MESSAGES)
-    {
-        return Ok(cached.allowed);
-    }
-
-    // Cache miss — call Aether
-    let response = state
-        .client
-        .check_usage(entity_type, entity_id, METER_KEY_MESSAGES, 1.0)
-        .await?;
-
-    state.cache.put_usage(
-        entity_type,
-        entity_id,
-        METER_KEY_MESSAGES,
-        CachedUsage {
-            allowed: response.allowed,
-        },
-    );
-
-    Ok(response.allowed)
 }
 
 /// Check the `voice_enabled` entitlement, using cache when available

@@ -11,6 +11,7 @@ pub mod hooks;
 pub mod jwt;
 pub mod knowledge;
 pub mod life_json;
+pub mod managed;
 pub mod nodes;
 pub mod pairing;
 pub mod personas;
@@ -114,10 +115,8 @@ pub struct ApiState {
     pub rate_limiter: Option<rate_limit::SharedLimiter>,
     /// Active WebSocket senders keyed by user ID, for proactive `ws_push` delivery
     pub ws_senders: Option<WsSenders>,
-    /// Aether billing state for entitlement and usage-limit enforcement
+    /// Aether billing state for entitlement checks and plan tier lookups
     pub billing_state: Option<crate::billing::BillingState>,
-    /// Async usage recorder for post-turn token metering
-    pub usage_recorder: Option<synapse_billing::UsageRecorder>,
     /// Skills system configuration
     pub skills_config: crate::config::SkillsConfig,
     /// Agent-level skill filter
@@ -628,18 +627,6 @@ impl ApiServerBuilder {
             None
         };
 
-        let usage_recorder = billing_state.as_ref().map(|bs| {
-            let meter_keys = synapse_billing::MeterKeys {
-                input_tokens: std::env::var("AETHER_METER_INPUT_TOKENS")
-                    .unwrap_or_else(|_| "input_tokens".to_owned()),
-                output_tokens: std::env::var("AETHER_METER_OUTPUT_TOKENS")
-                    .unwrap_or_else(|_| "output_tokens".to_owned()),
-                requests: std::env::var("AETHER_METER_REQUESTS")
-                    .unwrap_or_else(|_| "requests".to_owned()),
-            };
-            synapse_billing::UsageRecorder::new((*bs.client).clone(), meter_keys)
-        });
-
         let db_for_harness = self.db.clone();
         let state = Arc::new(ApiState {
             db: self.db,
@@ -685,7 +672,6 @@ impl ApiServerBuilder {
             rate_limiter,
             ws_senders: Some(Arc::new(RwLock::new(HashMap::new()))),
             billing_state,
-            usage_recorder,
             skill_filter: self.skills_config.skill_filter.clone(),
             voice_enabled: self.voice_enabled,
             skills_config: self.skills_config,
@@ -787,7 +773,7 @@ impl ApiServer {
             tracing::info!(path = %static_dir.display(), "serving static files");
         }
 
-        // Billing: entitlement + usage-limit enforcement (cloud mode only, when Aether is configured)
+        // Billing: entitlement enforcement (cloud mode only, when Aether is configured)
         let router = if let (Some(billing_state), Some(jwt_cache)) = (
             self.state.billing_state.clone(),
             self.state.jwt_cache.clone(),

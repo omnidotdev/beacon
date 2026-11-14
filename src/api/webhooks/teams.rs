@@ -164,7 +164,7 @@ pub async fn handle_activity(
             .unwrap_or_default(),
         Err(e) => {
             tracing::error!(error = %e, "synapse error");
-            "Sorry, I encountered an error processing your message.".to_string()
+            crate::billing::gateway_error::channel_reply(&e.to_string())
         }
     };
 

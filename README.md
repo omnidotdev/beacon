@@ -65,6 +65,19 @@ beacon doctor    # Health check
 beacon status    # Service status
 ```
 
+## Cloud mode and Omni credits
+
+With `BEACON_CLOUD_MODE=true` (the hosted deployment), Beacon requires a Gatekeeper JWT and runs managed AI on Omni credits:
+
+- Each user gets a product-scoped Synapse key (`appId: "beacon"`, billed to the user) provisioned through `SYNAPSE_API_URL` and cached per user, app, and billed entity
+- The Synapse gateway checks credits before spend, meters the request, and deducts from the user's pooled Omni balance (one balance shared across Omni products). Beacon keeps no ledger, price markup, or usage meter of its own
+- Out of credits (402) shows an out-of-credits message linking to `BEACON_BILLING_URL` (default `https://beacon.omni.dev/settings`) to buy credits or upgrade; 503 shows a temporarily-unavailable message. Neither is retried on another model. This applies to web chat, voice, and channel replies
+- There is no shared-key fallback: if a managed key cannot be provisioned, AI is reported as unavailable
+- The free tier defaults to `anthropic/claude-haiku-5-5`; paid tiers default to `BEACON_LLM_MODEL` (`anthropic/claude-sonnet-5-5`). The tier comes from Aether entitlements
+- Entitlements (`api_access`, `voice_enabled`) are enforced via Aether when `BILLING_BASE_URL` and `BILLING_SERVICE_API_KEY` are set
+
+BYOK keys and self-hosted mode are unaffected.
+
 ## Development
 
 ```bash

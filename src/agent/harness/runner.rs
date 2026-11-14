@@ -42,7 +42,6 @@ pub struct HarnessTurnDeps<'a> {
     pub adapter_registry: &'a AdapterRegistry,
     pub harness_session_repo: &'a HarnessSessionRepo,
     pub session_repo: &'a SessionRepo,
-    pub usage_recorder: Option<&'a synapse_billing::UsageRecorder>,
     pub usage_repo: Option<&'a crate::db::UsageRepo>,
 }
 
@@ -63,7 +62,6 @@ pub async fn run_harness_turn(
     channel: &str,
     channel_id: &str,
     session_id: &str,
-    user_id: &str,
 ) -> crate::Result<String> {
     // Resolve adapter
     let adapter = deps.adapter_registry.get(&config.adapter).ok_or_else(|| {
@@ -131,20 +129,6 @@ pub async fn run_harness_turn(
 
         #[allow(clippy::cast_possible_truncation)]
         let (input_tokens, output_tokens) = (usage.input_tokens as u32, usage.output_tokens as u32);
-
-        if let Some(recorder) = deps.usage_recorder {
-            let idempotency_key = uuid::Uuid::new_v4().to_string();
-            recorder.record(synapse_billing::UsageEvent {
-                entity_type: "user".to_owned(),
-                entity_id: user_id.to_owned(),
-                model: model.to_owned(),
-                provider: provider.to_owned(),
-                input_tokens,
-                output_tokens,
-                estimated_cost_usd: usage.cost_usd,
-                idempotency_key,
-            });
-        }
 
         if let Some(usage_repo) = deps.usage_repo
             && let Err(e) = usage_repo.record(

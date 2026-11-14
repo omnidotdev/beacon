@@ -644,8 +644,7 @@ pub async fn process_telegram_message(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "synapse stream error");
-                    final_response =
-                        "Sorry, I encountered an error processing your message.".to_string();
+                    final_response = crate::billing::gateway_error::channel_reply(&e.to_string());
                     break;
                 }
             }

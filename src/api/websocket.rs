@@ -197,15 +197,9 @@ async fn handle_socket(
     }
 
     // Check conversations limit when billing is enabled
-    if let (Some(billing_state), Some(user_id)) =
-        (&state.billing_state, &gatekeeper_user_id)
-    {
-        match crate::billing::middleware::check_conversations_usage(
-            billing_state,
-            "user",
-            user_id,
-        )
-        .await
+    if let (Some(billing_state), Some(user_id)) = (&state.billing_state, &gatekeeper_user_id) {
+        match crate::billing::middleware::check_conversations_usage(billing_state, "user", user_id)
+            .await
         {
             Ok(true) => {}
             Ok(false) => {
@@ -564,7 +558,7 @@ async fn handle_chat_message(
         .as_ref()
         .map_or_else(|_| content.to_string(), |ctx| ctx.format_prompt(content));
 
-    // Resolve Synapse client for this user (BYOK or default)
+    // Resolve Synapse client for this user (BYOK or product-scoped managed key)
     let (synapse_to_use, model_override) = if let (Some(gk_user_id), Some(resolver)) =
         (&gatekeeper_user_id, &state.key_resolver)
     {
@@ -574,19 +568,18 @@ async fn handle_chat_message(
             "resolving synapse client for authenticated user"
         );
         match resolve_user_synapse(resolver, gk_user_id, state).await {
-            Some((client, model)) => (Some(client), Some(model)),
-            None if state.cloud_mode => {
-                tracing::warn!(user_id = %gk_user_id, "cloud mode: no user key resolved, cannot fall back to shared client");
-                let error = WsOutgoing::Error {
-                    code: "provision_failed".to_string(),
-                    message: "Unable to provision your account. Please try again or check your API key settings.".to_string(),
-                };
-                tx.send(error)
-                    .await
-                    .map_err(|_| crate::Error::Config("channel closed".to_string()))?;
+            Ok(Some((client, model))) => (Some(client), Some(model)),
+            Ok(None) if state.cloud_mode => {
+                // Cloud mode never falls back to the shared client
+                let failure = super::managed::ManagedError::Unavailable;
+                send_error(&tx, failure.code(), failure.user_message()).await?;
                 return Ok(());
             }
-            None => (state.synapse.clone(), None),
+            Ok(None) => (state.synapse.clone(), None),
+            Err(failure) => {
+                send_error(&tx, failure.code(), failure.user_message()).await?;
+                return Ok(());
+            }
         }
     } else if state.cloud_mode {
         tracing::warn!(
@@ -781,6 +774,15 @@ async fn handle_chat_message(
                 error = %e,
                 "agent turn failed"
             );
+            // A gateway refusal (402 out of credits, 503 unavailable) gets a
+            // dedicated outcome and is never retried on another model
+            if let Some(failure) = crate::billing::gateway_error::classify(&e.to_string()) {
+                if let Some(gk_user_id) = gatekeeper_user_id {
+                    super::managed::note_gateway_failure(state, gk_user_id, failure);
+                }
+                send_error(&tx, failure.code(), failure.user_message()).await?;
+                return Ok(());
+            }
             let error = WsOutgoing::Error {
                 code: "agent_error".to_string(),
                 message: e.to_string(),
@@ -872,17 +874,37 @@ fn resolve_local_key(state: &Arc<ApiState>) -> Option<(Arc<SynapseClient>, Strin
     None
 }
 
+/// Send a typed error frame to the client
+async fn send_error(
+    tx: &mpsc::Sender<WsOutgoing>,
+    code: &str,
+    message: String,
+) -> crate::Result<()> {
+    tx.send(WsOutgoing::Error {
+        code: code.to_string(),
+        message,
+    })
+    .await
+    .map_err(|_| crate::Error::Config("channel closed".to_string()))
+}
+
 /// Resolve a per-user Synapse client based on their BYOK key or managed key
 ///
 /// Resolution priority:
 /// 1. User's preferred provider key (respects Synapse `defaultProvider` preference)
-/// 2. Auto-provision via Synapse API (if cloud mode + provisioner available)
-/// 3. Fallback: return None, caller uses shared `state.synapse`
+/// 2. Cloud mode: the user's product-scoped managed key, billed to the user
+///    under Beacon's Aether app, with the plan-tier default model
+/// 3. Self-hosted: `Ok(None)`, caller uses the local client
+///
+/// # Errors
+///
+/// In cloud mode, returns the managed failure when no product-scoped key can
+/// be provisioned. There is no shared-key fallback for managed traffic
 async fn resolve_user_synapse(
     resolver: &crate::providers::KeyResolver,
     user_id: &str,
     state: &Arc<ApiState>,
-) -> Option<(Arc<SynapseClient>, String)> {
+) -> Result<Option<(Arc<SynapseClient>, String)>, super::managed::ManagedError> {
     let synapse_base_url = state.synapse.as_ref().map_or_else(
         || "http://localhost:6000".to_string(),
         |c| c.base_url().to_string(),
@@ -890,7 +912,7 @@ async fn resolve_user_synapse(
 
     // Step 1: Use user's preferred BYOK key (respects Synapse defaultProvider preference)
     // Priority: explicit defaultProvider → anthropic → openai → openrouter
-    // Skip omni_credits here — it's a managed provider handled by auto-provisioning (step 2)
+    // Skip omni_credits here — it's a managed provider handled by step 2
     match resolver.resolve_preferred(user_id).await {
         Ok(Some((ref provider_name, ref resolved_key)))
             if resolved_key.is_user_key && provider_name != "omni_credits" =>
@@ -912,7 +934,7 @@ async fn resolve_user_synapse(
 
             if let Ok(client) = SynapseClient::new(&synapse_base_url) {
                 let client = client.with_api_key(resolved_key.api_key.clone());
-                return Some((Arc::new(client), model));
+                return Ok(Some((Arc::new(client), model)));
             }
             tracing::error!(url = %synapse_base_url, "failed to create SynapseClient for BYOK key");
         }
@@ -927,50 +949,19 @@ async fn resolve_user_synapse(
         }
     }
 
-    // Step 2: Auto-provision via Synapse API (cloud mode only)
-    if state.cloud_mode {
-        if let Some(provisioner) = &state.key_provisioner {
-            match provisioner.provision(user_id, None, None).await {
-                Ok(provisioned) => {
-                    tracing::info!(
-                        user_id = %user_id,
-                        plan = %provisioned.plan,
-                        "auto-provisioned managed key"
-                    );
-
-                    // Invalidate resolver cache so next resolve fetches the new key from Synapse
-                    resolver.invalidate(user_id).await;
-
-                    let model = crate::daemon::DEFAULT_MODEL.to_string();
-
-                    if let Ok(client) = SynapseClient::new(&synapse_base_url) {
-                        let client = client.with_api_key(provisioned.api_key);
-                        return Some((Arc::new(client), model));
-                    }
-                    tracing::error!(url = %synapse_base_url, "failed to create SynapseClient for provisioned key");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        user_id = %user_id,
-                        "auto-provision failed"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(user_id = %user_id, "cloud mode but no key provisioner configured");
-        }
-    } else {
-        tracing::debug!(user_id = %user_id, "non-cloud mode, skipping auto-provision");
+    // Step 2: Product-scoped managed key (cloud mode only)
+    if !state.cloud_mode {
+        tracing::debug!(user_id = %user_id, "non-cloud mode, skipping managed key");
+        return Ok(None);
     }
 
-    // Step 3: No personal key available, caller falls back to state.synapse
-    tracing::warn!(
+    let managed = super::managed::managed_client(state, user_id).await?;
+    tracing::info!(
         user_id = %user_id,
-        cloud_mode = state.cloud_mode,
-        "no synapse key resolved — falling back to shared client (may lack auth)"
+        model = %managed.default_model,
+        "using product-scoped managed key"
     );
-    None
+    Ok(Some((managed.client, managed.default_model)))
 }
 
 #[cfg(test)]

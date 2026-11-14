@@ -363,43 +363,8 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
         .as_ref()
         .map_or_else(|| "unknown".to_owned(), |m| m.provider.clone());
 
-    if let Some(recorder) = &state.usage_recorder {
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
-        recorder.record(synapse_billing::UsageEvent {
-            entity_type: "user".to_owned(),
-            entity_id: config.user_id.clone(),
-            model: config.model.clone(),
-            provider: provider.clone(),
-            input_tokens: total_input_tokens,
-            output_tokens: total_output_tokens,
-            estimated_cost_usd: estimated_cost,
-            idempotency_key,
-        });
-    }
-
-    // Record message count to Aether (fire-and-forget, separate from token recording)
-    if let Some(billing) = &state.billing_state {
-        let client = billing.client.clone();
-        let entity_id = config.user_id.clone();
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
-        tokio::spawn(async move {
-            if let Err(e) = client
-                .record_usage(
-                    "user",
-                    &entity_id,
-                    "messages",
-                    1.0,
-                    &idempotency_key,
-                    std::collections::HashMap::new(),
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to record message count to Aether");
-            }
-        });
-    }
-
-    // Record usage locally
+    // Record usage locally for the operator's own usage log. This estimate is
+    // never billed: managed spend is metered and charged by the Synapse gateway
     if let Some(ref usage_repo) = state.usage_repo
         && let Err(e) = usage_repo.record(
             &config.session_id,
