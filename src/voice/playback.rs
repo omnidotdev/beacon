@@ -69,7 +69,7 @@ impl AudioPlayback {
     ///
     /// Returns error if playback fails
     #[allow(clippy::unused_async)]
-    pub async fn play(&mut self, samples: Vec<f32>) -> Result<()> {
+    pub fn play(&mut self, samples: Vec<f32>) -> Result<()> {
         self.play_samples_blocking(samples)
     }
 
@@ -79,7 +79,7 @@ impl AudioPlayback {
     ///
     /// Returns error if decoding or playback fails
     #[allow(clippy::unused_async)]
-    pub async fn play_mp3(&mut self, mp3_data: &[u8]) -> Result<()> {
+    pub fn play_mp3(&mut self, mp3_data: &[u8]) -> Result<()> {
         let samples = decode_mp3(mp3_data)?;
         self.play_samples_blocking(samples)
     }

@@ -50,7 +50,7 @@ impl Daemon {
     ///
     /// Returns error if initialization fails
     #[allow(clippy::unused_async)]
-    pub async fn new(config: Config, port: u16) -> Result<Self> {
+    pub fn new(config: Config, port: u16) -> Result<Self> {
         let db_path = config.data_dir.join("beacon.db");
         let db = db::init(&db_path)?;
 
@@ -3157,7 +3157,7 @@ async fn speak(
         .synthesize(&request)
         .await
         .map_err(|e| Error::Tts(e.to_string()))?;
-    playback.play_mp3(&audio).await
+    playback.play_mp3(&audio)
 }
 
 /// Extract command after wake word

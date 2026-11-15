@@ -1120,9 +1120,7 @@ impl Config {
         let telegram = api_keys.telegram.as_ref().map(|token| {
             let mut tg = TelegramConfig::new(token.clone());
             tg.bot_username = std::env::var("TELEGRAM_BOT_USERNAME").ok();
-            tg.require_mention_in_groups = std::env::var("TELEGRAM_REQUIRE_MENTION")
-                .ok()
-                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            tg.require_mention_in_groups = std::env::var("TELEGRAM_REQUIRE_MENTION").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             tg.reaction_level = std::env::var("TELEGRAM_REACTION_LEVEL")
                 .map(|s| ReactionLevel::from_str(&s))
                 .unwrap_or_default();
@@ -1140,9 +1138,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4000);
-            tg.show_reasoning = std::env::var("TELEGRAM_SHOW_REASONING")
-                .ok()
-                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            tg.show_reasoning = std::env::var("TELEGRAM_SHOW_REASONING").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             tg.api_timeout_secs = std::env::var("TELEGRAM_API_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -1152,12 +1148,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60);
             tg.proxy = std::env::var("TELEGRAM_PROXY").ok();
-            tg.debug_updates = std::env::var("TELEGRAM_DEBUG_UPDATES")
-                .ok()
-                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-            tg.debug_responses = std::env::var("TELEGRAM_DEBUG_RESPONSES")
-                .ok()
-                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            tg.debug_updates = std::env::var("TELEGRAM_DEBUG_UPDATES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            tg.debug_responses = std::env::var("TELEGRAM_DEBUG_RESPONSES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
             // Load additional accounts from TELEGRAM_ACCOUNTS (comma-separated IDs)
             // Each account reads TELEGRAM_{ID}_BOT_TOKEN, TELEGRAM_{ID}_BOT_USERNAME, etc.
@@ -1369,8 +1361,7 @@ impl Config {
 
         // Check env var for enabled state
         let enabled = std::env::var("BEACON_HOOKS_ENABLED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .map_or(true, |v| v == "1" || v.eq_ignore_ascii_case("true"));
 
         HooksConfig {
             enabled,

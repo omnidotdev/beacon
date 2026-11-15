@@ -190,7 +190,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(cmd) = cli.command {
         return match cmd {
             Command::TestMic { duration } => test_mic(duration).await,
-            Command::TestSpeaker => test_speaker().await,
+            Command::TestSpeaker => test_speaker(),
             Command::TestTts { text } => Box::pin(test_tts(persona_ref, &text)).await,
             Command::SetLifeJson { user, path } => set_life_json(persona_ref, &user, &path),
             Command::GetLifeJson { user } => get_life_json(persona_ref, &user),
@@ -221,7 +221,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let wake_word = config.persona.wake_word().map(ToString::to_string);
 
     // Create and run daemon
-    let daemon = Daemon::new(config, cli.port).await?;
+    let daemon = Daemon::new(config, cli.port)?;
 
     if voice_enabled {
         if let Some(ww) = &wake_word {
@@ -300,7 +300,7 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 }
 
 /// Test speaker output with a sine wave
-async fn test_speaker() -> anyhow::Result<()> {
+fn test_speaker() -> anyhow::Result<()> {
     println!("Testing speaker output...");
     println!("You should hear a 440Hz tone for 2 seconds\n");
 
@@ -327,7 +327,7 @@ async fn test_speaker() -> anyhow::Result<()> {
 
     println!("Playing {} samples at {} Hz...", samples.len(), sample_rate);
 
-    playback.play(samples).await?;
+    playback.play(samples)?;
 
     println!("\n---");
     println!("If you heard the tone, your speakers are working!");
@@ -385,7 +385,7 @@ async fn test_tts(persona: Option<&str>, text: &str) -> anyhow::Result<()> {
 
     println!("Playing audio...");
     let mut playback = AudioPlayback::new()?;
-    playback.play_mp3(&mp3_data).await?;
+    playback.play_mp3(&mp3_data)?;
 
     println!("\n---");
     println!("If you heard the speech, TTS is working!");

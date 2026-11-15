@@ -338,7 +338,7 @@ pub struct GatewayInfo {
 /// Get gateway info for discovery/pairing
 async fn get_gateway_info(State(state): State<Arc<ApiState>>) -> Json<GatewayInfo> {
     Json(GatewayInfo {
-        device_id: format!("beacon-{}", &state.persona_id),
+        device_id: format!("beacon-{}", state.persona_id),
         name: "Beacon Gateway".to_string(),
         version: env!("CARGO_PKG_VERSION"),
         persona: state.persona_id.clone(),
