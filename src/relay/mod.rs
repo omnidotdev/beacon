@@ -74,8 +74,7 @@ impl RelayConfig {
     #[must_use]
     pub fn from_env() -> Self {
         let enabled = std::env::var("BEACON_RELAY_ENABLED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
         let local_port = std::env::var("BEACON_PORT")
             .ok()

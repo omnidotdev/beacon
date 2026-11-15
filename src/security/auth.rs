@@ -107,8 +107,7 @@ impl AuthConfig {
         let token = std::env::var("BEACON_AUTH_TOKEN").ok();
         let password_hash = std::env::var("BEACON_AUTH_PASSWORD_HASH").ok();
         let allow_local_bypass = std::env::var("BEACON_AUTH_ALLOW_LOCAL_BYPASS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .map_or(true, |v| v == "1" || v.eq_ignore_ascii_case("true"));
 
         Self {
             mode,

@@ -128,7 +128,7 @@ impl Indexer {
         // Create and store memories
         let mut memories = Vec::new();
 
-        for (fact, embedding) in safe_facts.into_iter().zip(embeddings.into_iter()) {
+        for (fact, embedding) in safe_facts.into_iter().zip(embeddings) {
             let category = match fact.category.as_str() {
                 "preference" => MemoryCategory::Preference,
                 "correction" => MemoryCategory::Correction,
