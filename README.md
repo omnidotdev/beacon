@@ -69,14 +69,16 @@ beacon status    # Service status
 
 With `BEACON_CLOUD_MODE=true` (the hosted deployment), Beacon requires a Gatekeeper JWT and runs managed AI on Omni credits:
 
-- Each user gets a product-scoped Synapse key (`appId: "beacon"`, billed to the user) provisioned through `SYNAPSE_API_URL` and cached per user, app, and billed entity
-- The Synapse gateway checks credits before spend, meters the request, and deducts from the user's pooled Omni balance (one balance shared across Omni products). Beacon keeps no ledger, price markup, or usage meter of its own
+- Beacon bills the user's personal workspace, like every Omni product bills a workspace: its plan sets the entitlements, plan tier, and conversations meter, and its credits pay for managed AI. The gateway reads the personal workspace from Gatekeeper userinfo (`AUTH_BASE_URL`) with the user's own token and caches it per user; work that runs without a token (scheduled check-ins, workflows) uses the cached workspace and bills the user's own account until one is known
+- Each user gets a product-scoped Synapse key (`appId: "beacon"`, billed to their personal workspace) provisioned through `SYNAPSE_API_URL` and cached per user, app, and billed entity
+- The Synapse gateway checks credits before spend, meters the request, and deducts from the personal workspace's Omni balance. Beacon keeps no ledger, price markup, or usage meter of its own
+- `GET /api/billing/plan` (signed in) returns the personal workspace's plan tier and credit balance, so the app shows what the gateway enforces
 - Out of credits (402) shows an out-of-credits message linking to `BEACON_BILLING_URL` (default `https://beacon.omni.dev/settings`) to buy credits or upgrade; 503 shows a temporarily-unavailable message. Neither is retried on another model. This applies to web chat, voice, and channel replies
 - There is no shared-key fallback: if a managed key cannot be provisioned, AI is reported as unavailable
 - Managed models come from the Synapse gateway's Beacon model policy. `GET /api/providers/models` (signed in) returns the models the user may pick from the gateway's `GET /v1/models` on their key (ids, names, context windows, credit prices) with the default for their plan marked; a model outside the policy is refused by the gateway
 - The free tier sends the gateway's virtual `auto` model, which resolves to the policy default (Claude Haiku 5.5); paid tiers default to `BEACON_LLM_MODEL` (`anthropic/claude-sonnet-5-5`). The tier comes from Aether entitlements
-- Entitlements (`api_access`, `voice_enabled`) are enforced via Aether when `BILLING_BASE_URL` and `BILLING_SERVICE_API_KEY` are set
-- Semantic memory (embeddings via `openai/text-embedding-3-small`, fact extraction and retrieval query rewriting via `anthropic/claude-haiku-5-5`) runs through the gateway on the same per-user key, so it is charged to the user's credits like chat. A refused or failed memory call never blocks a reply: memory search falls back to keyword search and indexing is skipped
+- Entitlements (`api_access`, `voice_enabled`) are enforced via Aether for the personal workspace when `BILLING_BASE_URL` and `BILLING_SERVICE_API_KEY` are set
+- Semantic memory (embeddings via `openai/text-embedding-3-small`, fact extraction and retrieval query rewriting via `anthropic/claude-haiku-5-5`) runs through the gateway on the same per-user key, so it is charged to the personal workspace's credits like chat. A refused or failed memory call never blocks a reply: memory search falls back to keyword search and indexing is skipped
 - Attachment AI (image and video keyframe descriptions, audio transcription) runs through the gateway on the same per-user key. Channel messages without an Omni identity (for example Telegram) get no attachment AI in cloud mode: images, audio, and video stay as placeholders, and PDF text extraction (local) still runs
 
 BYOK keys and self-hosted mode are unaffected.

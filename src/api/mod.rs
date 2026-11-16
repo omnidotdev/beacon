@@ -1,6 +1,7 @@
 //! HTTP API server for beacon gateway
 
 pub mod admin;
+pub mod billing;
 pub mod feedback;
 pub use feedback::{FeedbackAnswer, FeedbackManager};
 mod auth;
@@ -728,6 +729,7 @@ impl ApiServer {
                 "/api/plugins",
                 plugins::router(self.state.plugin_manager.clone()),
             )
+            .nest("/api/billing", billing::router(self.state.clone()))
             .nest("/api", usage::router(self.state.clone()))
             .nest("/ws", websocket::router(self.state.clone()))
             .nest("/ws", nodes::ws_router(self.state.node_registry.clone()))

@@ -61,11 +61,16 @@ impl ManagedError {
 
 /// The entity Beacon bills for a user's managed AI.
 ///
-/// Beacon is a personal assistant: conversations, memory, and personas are
-/// keyed by the user, so the user's own account pays
+/// Omni bills workspaces, and a user's personal workspace stands in for the
+/// individual, so the personal workspace pays (its plan's entitlements and
+/// included credits apply). Until it is known (no signed-in request yet, or
+/// billing is off) the user's own account pays
 #[must_use]
-pub fn billing_entity_for(user_id: &str) -> BillingEntity {
-    BillingEntity::user(user_id)
+pub fn billing_entity_for(state: &ApiState, user_id: &str) -> BillingEntity {
+    state.billing_state.as_ref().map_or_else(
+        || BillingEntity::user(user_id),
+        |billing| billing.workspaces.entity_for(user_id),
+    )
 }
 
 /// Base URL of the Synapse gateway managed requests go to
@@ -90,7 +95,7 @@ pub async fn managed_gateway_key(
         return Err(ManagedError::Unavailable);
     };
 
-    let entity = billing_entity_for(user_id);
+    let entity = billing_entity_for(state, user_id);
     provisioner
         .managed_key(user_id, &entity)
         .await
@@ -196,7 +201,7 @@ pub fn note_gateway_failure(state: &ApiState, user_id: &str, failure: GatewayFai
     if failure == GatewayFailure::Unauthorized
         && let Some(provisioner) = &state.key_provisioner
     {
-        provisioner.invalidate(user_id, &billing_entity_for(user_id));
+        provisioner.invalidate(user_id, &billing_entity_for(state, user_id));
     }
 }
 
@@ -206,10 +211,16 @@ mod tests {
     use crate::providers::provisioner::BillingEntityType;
 
     #[test]
-    fn beacon_bills_the_user() {
-        let entity = billing_entity_for("u-1");
-        assert_eq!(entity.entity_type, BillingEntityType::User);
-        assert_eq!(entity.entity_id, "u-1");
+    fn beacon_bills_the_personal_workspace_once_known() {
+        let resolver = crate::billing::WorkspaceResolver::new(None);
+        let unknown = resolver.entity_for("u-1");
+        assert_eq!(unknown.entity_type, BillingEntityType::User);
+        assert_eq!(unknown.entity_id, "u-1");
+
+        resolver.remember("u-1", "ws-1");
+        let known = resolver.entity_for("u-1");
+        assert_eq!(known.entity_type, BillingEntityType::Organization);
+        assert_eq!(known.entity_id, "ws-1");
     }
 
     #[test]

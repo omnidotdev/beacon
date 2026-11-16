@@ -196,10 +196,19 @@ async fn handle_socket(
         return;
     }
 
-    // Check conversations limit when billing is enabled
+    // Check conversations limit when billing is enabled, against the
+    // workspace the user's usage bills (their personal workspace)
     if let (Some(billing_state), Some(user_id)) = (&state.billing_state, &gatekeeper_user_id) {
-        match crate::billing::middleware::check_conversations_usage(billing_state, "user", user_id)
-            .await
+        let entity = match &token {
+            Some(token) => billing_state.workspaces.resolve(user_id, token).await,
+            None => billing_state.workspaces.entity_for(user_id),
+        };
+        match crate::billing::middleware::check_conversations_usage(
+            billing_state,
+            entity.kind(),
+            &entity.entity_id,
+        )
+        .await
         {
             Ok(true) => {}
             Ok(false) => {
