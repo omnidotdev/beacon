@@ -1,29 +1,34 @@
 //! Aether billing integration for Beacon gateway
 //!
 //! Beacon is a credit product: managed AI runs through a product-scoped
-//! Synapse key (`appId` = [`BEACON_APP_ID`], billed to the user), and the
-//! Synapse gateway is the only place cost is converted to credits, checked
-//! (402 before spend), and deducted from the pooled Omni balance. Beacon never
-//! meters, prices, or deducts usage itself.
+//! Synapse key (`appId` = [`BEACON_APP_ID`], billed to the user's personal
+//! workspace, see [`workspace`]), and the Synapse gateway is the only place
+//! cost is converted to credits, checked (402 before spend), and deducted from
+//! that workspace's balance. Beacon never meters, prices, or deducts usage
+//! itself.
 //!
 //! This module covers what Beacon still asks Aether directly: feature
 //! entitlements (`api_access`, `voice_enabled`), the conversations meter, and
-//! the plan tier that picks the default model. Enabled when
-//! `BILLING_BASE_URL` is set.
+//! the plan tier that picks the default model, all for the user's personal
+//! workspace. Enabled when `BILLING_BASE_URL` is set.
 
 pub mod gateway_error;
 pub mod middleware;
 pub mod pricing;
 pub mod tier;
+pub mod workspace;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use mini_moka::sync::Cache;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use synapse_billing::AetherClient;
 
 pub use tier::{GATEWAY_DEFAULT_MODEL, PlanTier};
+pub use workspace::WorkspaceResolver;
+
+use crate::providers::provisioner::BillingEntity;
 
 /// Aether app id Beacon bills and checks entitlements against.
 ///
@@ -47,6 +52,10 @@ const FAIL_MODE_VARS: &[&str] = &["BILLING_FAIL_MODE", "AETHER_FAIL_MODE"];
 /// Cache TTL env names, fleet standard first
 const CACHE_TTL_VARS: &[&str] = &["BILLING_CACHE_TTL_SECS", "AETHER_CACHE_TTL_SECS"];
 
+/// Gatekeeper base URL env names (the personal workspace lookup), the same
+/// ones JWT validation reads
+const AUTH_BASE_URL_VARS: &[&str] = &["AUTH_BASE_URL", "GATEKEEPER_URL"];
+
 /// Fail mode used when Aether is unreachable
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailMode {
@@ -67,6 +76,8 @@ pub struct BillingConfig {
     pub fail_mode: FailMode,
     /// TTL for cached entitlement, usage, and tier results
     pub cache_ttl_secs: u64,
+    /// Gatekeeper base URL, for resolving a user's personal workspace
+    pub auth_base_url: Option<String>,
 }
 
 impl BillingConfig {
@@ -109,6 +120,7 @@ impl BillingConfig {
             service_api_key: SecretString::new(service_api_key.into()),
             fail_mode,
             cache_ttl_secs,
+            auth_base_url: first(AUTH_BASE_URL_VARS),
         }))
     }
 }
@@ -122,6 +134,32 @@ pub struct BillingState {
     pub fail_mode: FailMode,
     /// TTL cache for entitlement and usage results
     pub cache: BillingCache,
+    /// Which workspace each user's usage bills
+    pub workspaces: WorkspaceResolver,
+    /// Read-only Aether access for the plan display (credit balance)
+    balance_reader: Arc<BalanceReader>,
+}
+
+/// Reads a billing entity's credit balance for display. Never checks or
+/// spends credits: the Synapse gateway is the only place credits are checked
+/// and deducted
+struct BalanceReader {
+    base_url: url::Url,
+    service_api_key: SecretString,
+    http: reqwest::Client,
+}
+
+/// Read a credit balance (retail USD) from Aether's balance response. The
+/// balance is a `numeric` column, so it may arrive as a JSON number or as a
+/// numeric string
+#[must_use]
+pub fn balance_from_json(body: &serde_json::Value) -> Option<f64> {
+    match body.get("balance")? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|balance: &f64| balance.is_finite())
 }
 
 impl BillingState {
@@ -146,11 +184,25 @@ impl BillingState {
     ///
     /// Returns an error if the `AetherClient` cannot be constructed.
     pub fn from_config(config: BillingConfig) -> anyhow::Result<Self> {
+        let balance_reader = BalanceReader {
+            base_url: config.base_url.clone(),
+            service_api_key: SecretString::from(config.service_api_key.expose_secret().to_owned()),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()?,
+        };
+
         let client = AetherClient::new(
             config.base_url,
             BEACON_APP_ID.to_string(),
             config.service_api_key,
         )?;
+
+        if config.auth_base_url.is_none() {
+            tracing::warn!(
+                "AUTH_BASE_URL not set, Beacon bills each user's own account instead of their personal workspace"
+            );
+        }
 
         tracing::info!(app_id = BEACON_APP_ID, "Aether billing enabled");
 
@@ -158,19 +210,72 @@ impl BillingState {
             client: Arc::new(client),
             fail_mode: config.fail_mode,
             cache: BillingCache::new(config.cache_ttl_secs),
+            workspaces: WorkspaceResolver::new(config.auth_base_url.as_deref()),
+            balance_reader: Arc::new(balance_reader),
         })
     }
 
-    /// Resolve a user's plan tier, cached for the TTL.
+    /// A billing entity's credit balance (retail USD), for display only.
+    /// `Ok(None)` when the entity has no billing account yet
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Aether is unreachable or refuses the read
+    pub async fn credit_balance(&self, entity: &BillingEntity) -> Result<Option<f64>, String> {
+        let reader = &self.balance_reader;
+        let url = reader
+            .base_url
+            .join(&format!(
+                "credits/{BEACON_APP_ID}/{}/{}/balance",
+                entity.kind(),
+                entity.entity_id
+            ))
+            .map_err(|e| format!("invalid balance URL: {e}"))?;
+
+        let response = reader
+            .http
+            .get(url)
+            .header("x-service-api-key", reader.service_api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|e| format!("balance request failed: {e}"))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(format!("balance read returned {status}"));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("invalid balance response: {e}"))?;
+
+        Ok(balance_from_json(&body))
+    }
+
+    /// Resolve the plan tier of the workspace a user's usage bills (their
+    /// personal workspace), cached for the TTL.
     ///
     /// Any Aether failure resolves to `Free`, so an outage can only make the
     /// default model cheaper, never more expensive
     pub async fn user_tier(&self, user_id: &str) -> PlanTier {
-        if let Some(tier) = self.cache.get_tier(user_id) {
+        self.entity_tier(&self.workspaces.entity_for(user_id)).await
+    }
+
+    /// Resolve a billing entity's plan tier, cached for the TTL
+    pub async fn entity_tier(&self, entity: &BillingEntity) -> PlanTier {
+        if let Some(tier) = self.cache.get_tier(entity) {
             return tier;
         }
 
-        let tier = match self.client.get_entitlements("user", user_id).await {
+        let tier = match self
+            .client
+            .get_entitlements(entity.kind(), &entity.entity_id)
+            .await
+        {
             Ok(entitlements) => tier::tier_from_entitlements(&entitlements),
             Err(e) => {
                 tracing::warn!(error = %e, "tier lookup failed, defaulting to free tier model");
@@ -178,7 +283,7 @@ impl BillingState {
             }
         };
 
-        self.cache.put_tier(user_id, tier);
+        self.cache.put_tier(entity, tier);
         tier
     }
 }
@@ -241,7 +346,7 @@ pub struct CachedUsage {
 pub struct BillingCache {
     entitlements: Cache<EntitlementKey, CachedEntitlement>,
     usage: Cache<UsageKey, CachedUsage>,
-    tiers: Cache<String, PlanTier>,
+    tiers: Cache<BillingEntity, PlanTier>,
 }
 
 impl BillingCache {
@@ -331,15 +436,15 @@ impl BillingCache {
         );
     }
 
-    /// Look up a cached plan tier for a user
+    /// Look up a cached plan tier for a billing entity
     #[must_use]
-    pub fn get_tier(&self, user_id: &str) -> Option<PlanTier> {
-        self.tiers.get(&user_id.to_string())
+    pub fn get_tier(&self, entity: &BillingEntity) -> Option<PlanTier> {
+        self.tiers.get(entity)
     }
 
-    /// Store a user's plan tier in the cache
-    pub fn put_tier(&self, user_id: &str, tier: PlanTier) {
-        self.tiers.insert(user_id.to_string(), tier);
+    /// Store a billing entity's plan tier in the cache
+    pub fn put_tier(&self, entity: &BillingEntity, tier: PlanTier) {
+        self.tiers.insert(entity.clone(), tier);
     }
 }
 
@@ -444,6 +549,28 @@ mod tests {
         assert!(BillingState::from_config(config).is_ok());
     }
 
+    #[test]
+    fn balance_reads_both_wire_shapes() {
+        // Aether's balance is a numeric column: a JSON number or a string
+        assert_eq!(
+            balance_from_json(&serde_json::json!({ "balance": 3.5 })),
+            Some(3.5)
+        );
+        assert_eq!(
+            balance_from_json(&serde_json::json!({ "balance": "3.5000" })),
+            Some(3.5)
+        );
+        assert_eq!(
+            balance_from_json(&serde_json::json!({ "balance": 0 })),
+            Some(0.0)
+        );
+        assert_eq!(
+            balance_from_json(&serde_json::json!({ "balance": "n/a" })),
+            None
+        );
+        assert_eq!(balance_from_json(&serde_json::json!({})), None);
+    }
+
     #[tokio::test]
     async fn default_model_without_billing_is_the_free_tier_model() {
         let model = default_model_for_user(None, "u", "anthropic/claude-sonnet-5-5").await;
@@ -459,10 +586,62 @@ mod tests {
         .unwrap()
         .unwrap();
         let state = BillingState::from_config(config).unwrap();
-        state.cache.put_tier("paid-user", PlanTier::Paid);
+        state.workspaces.remember("paid-user", "paid-workspace");
+        state.cache.put_tier(
+            &BillingEntity::organization("paid-workspace"),
+            PlanTier::Paid,
+        );
         let model =
             default_model_for_user(Some(&state), "paid-user", "anthropic/claude-sonnet-5-5").await;
         assert_eq!(model, "anthropic/claude-sonnet-5-5");
+    }
+
+    #[tokio::test]
+    async fn the_tier_follows_the_personal_workspace_not_the_user() {
+        let config = BillingConfig::from_lookup(lookup(&[
+            ("BILLING_BASE_URL", "http://127.0.0.1:9"),
+            ("BILLING_SERVICE_API_KEY", "k"),
+        ]))
+        .unwrap()
+        .unwrap();
+        let state = BillingState::from_config(config).unwrap();
+        // A paid user-level row no longer applies once the workspace is known
+        state
+            .cache
+            .put_tier(&BillingEntity::user("u"), PlanTier::Paid);
+        state.workspaces.remember("u", "personal-workspace");
+        state.cache.put_tier(
+            &BillingEntity::organization("personal-workspace"),
+            PlanTier::Free,
+        );
+        assert_eq!(state.user_tier("u").await, PlanTier::Free);
+    }
+
+    #[test]
+    fn reads_the_auth_base_url_for_the_workspace_lookup() {
+        let config = BillingConfig::from_lookup(lookup(&[
+            ("BILLING_BASE_URL", "https://api.billing.omni.dev"),
+            ("BILLING_SERVICE_API_KEY", "k"),
+            ("AUTH_BASE_URL", "https://identity.omni.dev"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.auth_base_url.as_deref(),
+            Some("https://identity.omni.dev")
+        );
+
+        let legacy = BillingConfig::from_lookup(lookup(&[
+            ("BILLING_BASE_URL", "https://api.billing.omni.dev"),
+            ("BILLING_SERVICE_API_KEY", "k"),
+            ("GATEKEEPER_URL", "https://gatekeeper.example"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            legacy.auth_base_url.as_deref(),
+            Some("https://gatekeeper.example")
+        );
     }
 
     #[tokio::test]

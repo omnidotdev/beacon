@@ -43,27 +43,36 @@ impl PlanTier {
 /// never defaults to the more expensive model
 #[must_use]
 pub fn tier_from_entitlements(entitlements: &EntitlementsResponse) -> PlanTier {
-    let Some(value) = entitlements
+    match tier_name(entitlements).as_deref() {
+        None | Some("free") => PlanTier::Free,
+        Some(_) => PlanTier::Paid,
+    }
+}
+
+/// The plan tier's name (`free`, `pro`, `team`, ...), lowercased, or `None`
+/// when the tier entitlement is missing or empty.
+///
+/// Aether serves entitlement values as JSON, so the value may be a plain
+/// string, JSONB-quoted text (`"\"pro\""`), or a non-string JSON value
+#[must_use]
+pub fn tier_name(entitlements: &EntitlementsResponse) -> Option<String> {
+    let value = entitlements
         .entitlements
         .iter()
         .find(|e| e.feature_key == TIER_FEATURE_KEY)
-        .and_then(|e| e.value.as_ref())
-    else {
-        return PlanTier::Free;
-    };
+        .and_then(|e| e.value.as_ref())?;
 
     let raw = match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
 
-    // Aether may hand back JSONB-quoted text (`"\"pro\""`)
     let tier = raw.trim().trim_matches('"').to_ascii_lowercase();
 
-    if tier.is_empty() || tier == "free" || tier == "null" {
-        PlanTier::Free
+    if tier.is_empty() || tier == "null" {
+        None
     } else {
-        PlanTier::Paid
+        Some(tier)
     }
 }
 
@@ -96,6 +105,41 @@ mod tests {
                 tier.default_model("anthropic/claude-sonnet-5-5"),
                 "anthropic/claude-sonnet-5-5"
             );
+        }
+    }
+
+    #[test]
+    fn tier_name_reads_every_wire_shape() {
+        let plain = response(serde_json::json!([{ "featureKey": "tier", "value": "Pro" }]));
+        assert_eq!(tier_name(&plain).as_deref(), Some("pro"));
+
+        let quoted = response(serde_json::json!([{ "featureKey": "tier", "value": "\"team\"" }]));
+        assert_eq!(tier_name(&quoted).as_deref(), Some("team"));
+
+        assert_eq!(tier_name(&response(serde_json::json!([]))), None);
+    }
+
+    #[test]
+    fn numeric_limits_as_json_numbers_or_strings_parse_alongside_the_tier() {
+        // Aether sends limits as JSON numbers although clients type them as
+        // strings; both shapes must deserialize and leave the tier readable
+        for limits in [
+            serde_json::json!([
+                { "featureKey": "max_conversations", "value": -1 },
+                { "featureKey": "voice_enabled", "value": 1 },
+                { "featureKey": "included_credits", "value": 300 },
+                { "featureKey": "tier", "value": "pro" }
+            ]),
+            serde_json::json!([
+                { "featureKey": "max_conversations", "value": "-1" },
+                { "featureKey": "voice_enabled", "value": "1" },
+                { "featureKey": "included_credits", "value": "300" },
+                { "featureKey": "tier", "value": "pro" }
+            ]),
+        ] {
+            let r = response(limits);
+            assert_eq!(tier_name(&r).as_deref(), Some("pro"));
+            assert_eq!(tier_from_entitlements(&r), PlanTier::Paid);
         }
     }
 

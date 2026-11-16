@@ -52,9 +52,13 @@ pub async fn billing_middleware(
         return next.run(request).await;
     };
 
-    // Skip billing for marketplace management paths — no AI consumption
+    // Skip billing for marketplace management and plan lookups, no AI
+    // consumption (the plan lookup must work even without AI access)
     let path = request.uri().path();
-    if path.starts_with("/api/skills") || path.starts_with("/api/personas/marketplace") {
+    if path.starts_with("/api/skills")
+        || path.starts_with("/api/personas/marketplace")
+        || path.starts_with("/api/billing")
+    {
         return next.run(request).await;
     }
 
@@ -67,8 +71,11 @@ pub async fn billing_middleware(
         }
     };
 
-    let entity_type = "user";
-    let entity_id = sub.as_str();
+    // Entitlements belong to the workspace the user's usage bills (their
+    // personal workspace), learned here from their own token
+    let entity = billing.workspaces.resolve(&sub, &token).await;
+    let entity_type = entity.kind();
+    let entity_id = entity.entity_id.as_str();
 
     // Check api_access entitlement → 403 if denied
     match check_entitlement(&billing, entity_type, entity_id).await {

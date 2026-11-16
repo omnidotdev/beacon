@@ -44,6 +44,17 @@ pub enum BillingEntityType {
     Organization,
 }
 
+impl BillingEntityType {
+    /// Entity type as Aether names it in URL paths
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Organization => "organization",
+        }
+    }
+}
+
 /// The tenant a managed key bills
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,13 +66,29 @@ pub struct BillingEntity {
 }
 
 impl BillingEntity {
-    /// Bill a user's personal account (Beacon is a personal assistant)
+    /// Bill a user's own account. Only a fallback: Beacon bills the user's
+    /// personal workspace (see `billing::workspace`)
     #[must_use]
     pub fn user(user_id: impl Into<String>) -> Self {
         Self {
             entity_type: BillingEntityType::User,
             entity_id: user_id.into(),
         }
+    }
+
+    /// Bill a workspace (organization)
+    #[must_use]
+    pub fn organization(organization_id: impl Into<String>) -> Self {
+        Self {
+            entity_type: BillingEntityType::Organization,
+            entity_id: organization_id.into(),
+        }
+    }
+
+    /// Entity type as Aether names it in URL paths
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.entity_type.as_str()
     }
 }
 
