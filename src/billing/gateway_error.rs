@@ -3,7 +3,8 @@
 //! Managed AI runs through a product-scoped Synapse key, and the Synapse
 //! gateway is the only place credits are checked and charged. It refuses a
 //! request with 402 before any spend when the pooled Omni balance is empty,
-//! and with 503 when billing is unavailable. Beacon never retries a refused
+//! with a typed 402 (`payment_required`) when the account has never paid for
+//! managed AI, and with 503 when billing is unavailable. Beacon never retries a refused
 //! request on another model; it surfaces the outcome to the user instead.
 //!
 //! The Synapse client flattens the HTTP status into its error text
@@ -12,6 +13,9 @@
 
 /// WebSocket / HTTP error code for an empty credit balance
 pub const CODE_OUT_OF_CREDITS: &str = "out_of_credits";
+
+/// WebSocket / HTTP error code for managed AI on an account that has not paid
+pub const CODE_PAYMENT_REQUIRED: &str = "payment_required";
 
 /// WebSocket / HTTP error code for managed AI being temporarily unavailable
 pub const CODE_AI_UNAVAILABLE: &str = "ai_unavailable";
@@ -31,6 +35,8 @@ pub const GENERIC_ERROR_MESSAGE: &str = "Sorry, I encountered an error processin
 pub enum GatewayFailure {
     /// 402: the pooled credit balance cannot cover the request
     OutOfCredits,
+    /// 402 `payment_required`: managed AI is for paying accounts only
+    PaymentRequired,
     /// 503: billing or the gateway is unavailable, nothing was charged
     Unavailable,
     /// 401: the managed key was rejected (rotated or revoked)
@@ -43,6 +49,7 @@ impl GatewayFailure {
     pub const fn code(self) -> &'static str {
         match self {
             Self::OutOfCredits => CODE_OUT_OF_CREDITS,
+            Self::PaymentRequired => CODE_PAYMENT_REQUIRED,
             Self::Unavailable | Self::Unauthorized => CODE_AI_UNAVAILABLE,
         }
     }
@@ -52,6 +59,7 @@ impl GatewayFailure {
     pub fn user_message(self) -> String {
         match self {
             Self::OutOfCredits => out_of_credits_message(&billing_url()),
+            Self::PaymentRequired => payment_required_message(&billing_url()),
             Self::Unavailable | Self::Unauthorized => UNAVAILABLE_MESSAGE.to_string(),
         }
     }
@@ -62,7 +70,14 @@ impl GatewayFailure {
 #[must_use]
 pub fn classify(error_text: &str) -> Option<GatewayFailure> {
     // Typed error names from the gateway's JSON error body win over status
-    // parsing, since they survive any wrapping
+    // parsing, since they survive any wrapping. The paid-access refusal
+    // (`payment_required` / `payment_required_error`) is a 402 too, so it is
+    // checked first and never read as out of credits
+    if error_text.contains(CODE_PAYMENT_REQUIRED)
+        && matches!(first_http_status(error_text), None | Some(402))
+    {
+        return Some(GatewayFailure::PaymentRequired);
+    }
     if error_text.contains("insufficient_credits_error") {
         return Some(GatewayFailure::OutOfCredits);
     }
@@ -91,6 +106,15 @@ fn first_status_token(text: &str) -> Option<u16> {
         })
 }
 
+/// Find the first standalone 3-digit HTTP status token of any kind, so a typed
+/// code on a non-402 refusal is not read as a paid-access refusal
+fn first_http_status(text: &str) -> Option<u16> {
+    text.split(|c: char| !c.is_ascii_digit())
+        .filter(|token| token.len() == 3)
+        .filter_map(|token| token.parse::<u16>().ok())
+        .find(|status| (100..=599).contains(status))
+}
+
 /// Billing page users are sent to for credits or an upgrade
 #[must_use]
 pub fn billing_url() -> String {
@@ -106,6 +130,16 @@ pub fn out_of_credits_message(billing_url: &str) -> String {
     format!(
         "You're out of Omni credits (your balance is shared across Omni). \
          Buy credits or upgrade your plan to keep going: {billing_url}"
+    )
+}
+
+/// Paid-access copy: managed AI needs credits or a paid plan, or the user's
+/// own provider key
+#[must_use]
+pub fn payment_required_message(billing_url: &str) -> String {
+    format!(
+        "Beacon AI uses Omni credits. Buy credits or upgrade to Pro to start, \
+         or use your own API key: {billing_url}"
     )
 }
 
@@ -140,6 +174,47 @@ mod tests {
     fn classifies_typed_insufficient_credits_without_status() {
         let text = "stream error: insufficient_credits_error";
         assert_eq!(classify(text), Some(GatewayFailure::OutOfCredits));
+    }
+
+    #[test]
+    fn classifies_payment_required_type_from_synapse_client() {
+        for text in [
+            "402 payment_required: managed AI is for paying customers",
+            "402 payment_required_error: managed AI is for paying customers",
+        ] {
+            assert_eq!(classify(text), Some(GatewayFailure::PaymentRequired));
+        }
+    }
+
+    #[test]
+    fn classifies_payment_required_wrapped_by_agent_core() {
+        let text = "agent error: API error (0): 402 payment_required_error: paying customers only";
+        assert_eq!(classify(text), Some(GatewayFailure::PaymentRequired));
+    }
+
+    #[test]
+    fn payment_required_is_not_out_of_credits() {
+        // A plain 402 without the typed code stays out of credits
+        assert_eq!(
+            classify("402 unknown: payment required"),
+            Some(GatewayFailure::OutOfCredits)
+        );
+        // The typed code on another status is not a paid-access refusal
+        assert_ne!(
+            classify("403 payment_required: x"),
+            Some(GatewayFailure::PaymentRequired)
+        );
+    }
+
+    #[test]
+    fn payment_required_copy_offers_credits_upgrade_and_own_key() {
+        let msg = payment_required_message("https://beacon.omni.dev/settings");
+        assert!(msg.contains("Omni credits"));
+        assert!(msg.contains("Buy credits"));
+        assert!(msg.contains("upgrade to Pro"));
+        assert!(msg.contains("your own API key"));
+        assert!(msg.contains("https://beacon.omni.dev/settings"));
+        assert!(!msg.contains("out of"));
     }
 
     #[test]
@@ -183,6 +258,7 @@ mod tests {
     #[test]
     fn channel_reply_maps_each_outcome() {
         assert!(channel_reply("402 insufficient_credits_error: x").contains("out of Omni credits"));
+        assert!(channel_reply("402 payment_required_error: x").contains("upgrade to Pro"));
         assert_eq!(channel_reply("503 unknown: x"), UNAVAILABLE_MESSAGE);
         assert_eq!(
             channel_reply("500 internal_error: x"),
@@ -193,6 +269,7 @@ mod tests {
     #[test]
     fn codes_are_stable() {
         assert_eq!(GatewayFailure::OutOfCredits.code(), "out_of_credits");
+        assert_eq!(GatewayFailure::PaymentRequired.code(), "payment_required");
         assert_eq!(GatewayFailure::Unavailable.code(), "ai_unavailable");
         assert_eq!(GatewayFailure::Unauthorized.code(), "ai_unavailable");
     }

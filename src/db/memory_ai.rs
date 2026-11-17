@@ -67,7 +67,11 @@ impl MemoryAiError {
         let text = error.to_string();
         let refused = matches!(
             gateway_error::classify(&text),
-            Some(GatewayFailure::OutOfCredits | GatewayFailure::Unavailable)
+            Some(
+                GatewayFailure::OutOfCredits
+                    | GatewayFailure::PaymentRequired
+                    | GatewayFailure::Unavailable
+            )
         ) || matches!(
             error,
             synapse_client::SynapseClientError::Api { status: 403, .. }
@@ -281,6 +285,16 @@ mod tests {
         };
         assert!(matches!(
             MemoryAiError::from_client(&unavailable),
+            MemoryAiError::Refused(_)
+        ));
+
+        let payment_required = synapse_client::SynapseClientError::Api {
+            status: 402,
+            error_type: "payment_required_error".to_string(),
+            message: "paying customers only".to_string(),
+        };
+        assert!(matches!(
+            MemoryAiError::from_client(&payment_required),
             MemoryAiError::Refused(_)
         ));
 

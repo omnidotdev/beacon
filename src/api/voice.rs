@@ -239,7 +239,9 @@ impl IntoResponse for VoiceError {
             ),
             Self::Gateway(failure) => (
                 match failure {
-                    GatewayFailure::OutOfCredits => StatusCode::PAYMENT_REQUIRED,
+                    GatewayFailure::OutOfCredits | GatewayFailure::PaymentRequired => {
+                        StatusCode::PAYMENT_REQUIRED
+                    }
                     GatewayFailure::Unavailable | GatewayFailure::Unauthorized => {
                         StatusCode::SERVICE_UNAVAILABLE
                     }
@@ -276,6 +278,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         let body = body_json(response).await;
         assert_eq!(body["error"]["code"], "out_of_credits");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("/settings")
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_required_is_402_with_its_own_code() {
+        let response = VoiceError::Gateway(GatewayFailure::PaymentRequired).into_response();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let body = body_json(response).await;
+        assert_eq!(body["error"]["code"], "payment_required");
         assert!(
             body["error"]["message"]
                 .as_str()
