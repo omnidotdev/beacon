@@ -100,6 +100,8 @@ cargo clippy
 cargo run -- --foreground -v
 ```
 
+`rust-toolchain.toml` pins the stable toolchain, so local builds and the pre-commit hook (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) match CI. Git dependencies such as agent-core resolve from GitHub at the commits recorded in `Cargo.lock`; no sibling checkout is needed.
+
 ## Ecosystem
 
 - **[Omni CLI](https://github.com/omnidotdev/cli)** -- Agentic CLI sharing the agent-core library

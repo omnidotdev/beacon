@@ -19,10 +19,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
-      - name: Patch agent-core to git dep
-        run: |
-          sed -i 's|agent-core = { path = "../../../agent-core" }|agent-core = { git = "https://github.com/omnidotdev/agent-core" }|' Cargo.toml
-          sed -i '/^\[patch\."https:\/\/github\.com\/omnidotdev\/agent-core\.git"\]/,/^$/d' Cargo.toml
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy

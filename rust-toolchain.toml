@@ -1,0 +1,5 @@
+# Match CI (dtolnay/rust-toolchain@stable) so the pre-commit hook lints with
+# the same clippy that gates pull requests
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
