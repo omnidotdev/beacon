@@ -134,6 +134,9 @@ secrecy = "0.10"
 mini-moka = "0.10"
 
 # Agent core (shared LLM provider abstraction)
+# The exact commit is pinned by Cargo.lock. A `rev` here would split it from
+# the copy synapse-client pulls from the same repository's default branch,
+# leaving two incompatible agent-core crates in the graph
 agent-core = { git = "https://github.com/omnidotdev/agent-core.git", features = ["mcp", "tools", "web", "skills", "browser", "memory"] }
 
 # WASM plugin runtime
@@ -157,9 +160,6 @@ flate2 = "1"
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
 tokio-test = "0.4"
-
-[patch."https://github.com/omnidotdev/agent-core.git"]
-agent-core = { path = "../../../agent-core" }
 
 [profile.release]
 lto = "thin"
