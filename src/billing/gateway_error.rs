@@ -128,7 +128,7 @@ pub fn billing_url() -> String {
 #[must_use]
 pub fn out_of_credits_message(billing_url: &str) -> String {
     format!(
-        "You're out of Omni credits (your balance is shared across Omni). \
+        "You're out of AI credits (your balance is shared across Omni products). \
          Buy credits or upgrade your plan to keep going: {billing_url}"
     )
 }
@@ -138,7 +138,7 @@ pub fn out_of_credits_message(billing_url: &str) -> String {
 #[must_use]
 pub fn payment_required_message(billing_url: &str) -> String {
     format!(
-        "Beacon AI uses Omni credits. Buy credits or upgrade to Pro to start, \
+        "Beacon AI runs on AI credits. Buy credits or upgrade to Pro to start, \
          or use your own API key: {billing_url}"
     )
 }
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn payment_required_copy_offers_credits_upgrade_and_own_key() {
         let msg = payment_required_message("https://beacon.omni.dev/settings");
-        assert!(msg.contains("Omni credits"));
+        assert!(msg.contains("AI credits"));
         assert!(msg.contains("Buy credits"));
         assert!(msg.contains("upgrade to Pro"));
         assert!(msg.contains("your own API key"));
@@ -252,12 +252,12 @@ mod tests {
     fn out_of_credits_copy_links_to_billing() {
         let msg = out_of_credits_message("https://beacon.omni.dev/settings");
         assert!(msg.contains("https://beacon.omni.dev/settings"));
-        assert!(msg.contains("shared across Omni"));
+        assert!(msg.contains("shared across Omni products"));
     }
 
     #[test]
     fn channel_reply_maps_each_outcome() {
-        assert!(channel_reply("402 insufficient_credits_error: x").contains("out of Omni credits"));
+        assert!(channel_reply("402 insufficient_credits_error: x").contains("out of AI credits"));
         assert!(channel_reply("402 payment_required_error: x").contains("upgrade to Pro"));
         assert_eq!(channel_reply("503 unknown: x"), UNAVAILABLE_MESSAGE);
         assert_eq!(

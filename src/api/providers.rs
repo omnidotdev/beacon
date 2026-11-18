@@ -27,7 +27,7 @@ pub enum ProviderType {
     Anthropic,
     /// `OpenRouter` (aggregated access to multiple providers)
     Openrouter,
-    /// Omni Credits (pay-per-use via Synapse router)
+    /// AI credits (pay-per-use via Synapse router)
     OmniCredits,
 }
 
@@ -246,7 +246,7 @@ async fn list_providers(
 
             ProviderInfo {
                 id: ProviderType::OmniCredits,
-                name: "Omni Credits".to_string(),
+                name: "AI Credits".to_string(),
                 description: "Omni's AI gateway with current Claude models and MCP support. No API keys needed".to_string(),
                 status: omni_status,
                 active: preferred_provider.as_deref() == Some("omni_credits"),

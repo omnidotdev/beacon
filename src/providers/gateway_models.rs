@@ -24,7 +24,7 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .unwrap_or_default()
 });
 
-/// Retail price in Omni credits per million tokens, as the gateway bills
+/// Retail price in AI credits per million tokens, as the gateway bills
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CreditsPerMtok {
     pub input: f64,

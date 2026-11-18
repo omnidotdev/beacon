@@ -160,7 +160,7 @@ pub async fn managed_client(
 /// runs on
 ///
 /// Cloud mode always uses the user's product-scoped Beacon key, so the work is
-/// charged to the user's Omni credits like chat; without an authenticated user
+/// charged to the user's AI credits like chat; without an authenticated user
 /// there is no billable key and the caller degrades. Self-hosted instances use
 /// the turn's own gateway client (the operator's gateway and keys). `None`
 /// means auxiliary AI is off for this turn
