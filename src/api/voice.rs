@@ -45,7 +45,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<VoiceCapabilit
 /// Resolve the Synapse client for a voice request.
 ///
 /// Cloud mode runs on the caller's product-scoped managed key (never the
-/// shared client), so speech is charged to their pooled Omni credits.
+/// shared client), so speech is charged to their pooled AI credits.
 /// Self-hosted mode uses the local client. Returns the client and, in cloud
 /// mode, the user it bills
 async fn voice_client(
