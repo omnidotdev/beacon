@@ -34,12 +34,14 @@ pub struct ProvisionedKey {
     pub plan: String,
 }
 
-/// Entity types Aether bills
+/// Entity types Beacon bills
+///
+/// Only workspaces: Beacon bills the user's personal workspace and never the
+/// user entity, so a user-level balance can never split the plan or miss the
+/// card-verified free allowance
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BillingEntityType {
-    /// A personal account
-    User,
     /// A workspace (organization)
     Organization,
 }
@@ -49,7 +51,6 @@ impl BillingEntityType {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::User => "user",
             Self::Organization => "organization",
         }
     }
@@ -66,16 +67,6 @@ pub struct BillingEntity {
 }
 
 impl BillingEntity {
-    /// Bill a user's own account. Only a fallback: Beacon bills the user's
-    /// personal workspace (see `billing::workspace`)
-    #[must_use]
-    pub fn user(user_id: impl Into<String>) -> Self {
-        Self {
-            entity_type: BillingEntityType::User,
-            entity_id: user_id.into(),
-        }
-    }
-
     /// Bill a workspace (organization)
     #[must_use]
     pub fn organization(organization_id: impl Into<String>) -> Self {
@@ -294,6 +285,7 @@ mod tests {
     use super::*;
 
     const USER: &str = "0b9f5e3c-6a1d-4c2e-9f3a-1b2c3d4e5f60";
+    const WORKSPACE: &str = "7c1e2d3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 
     #[derive(Clone)]
     struct Mock {
@@ -336,7 +328,7 @@ mod tests {
 
     #[test]
     fn request_carries_app_id_and_billing_entity() {
-        let entity = BillingEntity::user(USER);
+        let entity = BillingEntity::organization(WORKSPACE);
         let body = ProvisionRequest {
             identity_provider_id: USER,
             email: None,
@@ -349,8 +341,8 @@ mod tests {
         assert_eq!(json["identityProviderId"], USER);
         assert_eq!(json["appId"], "beacon");
         assert_eq!(json["source"], "Beacon");
-        assert_eq!(json["billingEntity"]["entityType"], "user");
-        assert_eq!(json["billingEntity"]["entityId"], USER);
+        assert_eq!(json["billingEntity"]["entityType"], "organization");
+        assert_eq!(json["billingEntity"]["entityId"], WORKSPACE);
         assert!(json.get("email").is_none());
     }
 
@@ -369,7 +361,7 @@ mod tests {
     async fn provisions_once_per_user_app_and_entity() {
         let (url, mock) = spawn_mock(AxumStatus::OK).await;
         let provisioner = KeyProvisioner::new(url, "secret", "beacon");
-        let entity = BillingEntity::user(USER);
+        let entity = BillingEntity::organization(WORKSPACE);
 
         let first = provisioner.managed_key(USER, &entity).await.unwrap();
         let second = provisioner.managed_key(USER, &entity).await.unwrap();
@@ -380,8 +372,8 @@ mod tests {
 
         let bodies = mock.bodies.lock().unwrap();
         assert_eq!(bodies[0]["appId"], "beacon");
-        assert_eq!(bodies[0]["billingEntity"]["entityType"], "user");
-        assert_eq!(bodies[0]["billingEntity"]["entityId"], USER);
+        assert_eq!(bodies[0]["billingEntity"]["entityType"], "organization");
+        assert_eq!(bodies[0]["billingEntity"]["entityId"], WORKSPACE);
         drop(bodies);
     }
 
@@ -389,7 +381,7 @@ mod tests {
     async fn concurrent_misses_provision_once() {
         let (url, mock) = spawn_mock(AxumStatus::OK).await;
         let provisioner = KeyProvisioner::new(url, "secret", "beacon");
-        let entity = BillingEntity::user(USER);
+        let entity = BillingEntity::organization(WORKSPACE);
 
         let (a, b) = tokio::join!(
             provisioner.managed_key(USER, &entity),
@@ -403,7 +395,7 @@ mod tests {
     async fn invalidate_forces_a_fresh_key() {
         let (url, mock) = spawn_mock(AxumStatus::OK).await;
         let provisioner = KeyProvisioner::new(url, "secret", "beacon");
-        let entity = BillingEntity::user(USER);
+        let entity = BillingEntity::organization(WORKSPACE);
 
         let first = provisioner.managed_key(USER, &entity).await.unwrap();
         provisioner.invalidate(USER, &entity);
@@ -417,7 +409,7 @@ mod tests {
     async fn forbidden_is_denied_and_not_cached() {
         let (url, mock) = spawn_mock(AxumStatus::FORBIDDEN).await;
         let provisioner = KeyProvisioner::new(url, "secret", "beacon");
-        let entity = BillingEntity::user(USER);
+        let entity = BillingEntity::organization(WORKSPACE);
 
         let err = provisioner.managed_key(USER, &entity).await.unwrap_err();
         assert!(matches!(err, ProvisionError::Denied(_)));
@@ -430,7 +422,7 @@ mod tests {
         let (url, _mock) = spawn_mock(AxumStatus::INTERNAL_SERVER_ERROR).await;
         let provisioner = KeyProvisioner::new(url, "secret", "beacon");
         let err = provisioner
-            .managed_key(USER, &BillingEntity::user(USER))
+            .managed_key(USER, &BillingEntity::organization(WORKSPACE))
             .await
             .unwrap_err();
         assert!(matches!(err, ProvisionError::Unavailable(_)));
@@ -440,7 +432,7 @@ mod tests {
     async fn unreachable_synapse_is_unavailable() {
         let provisioner = KeyProvisioner::new("http://127.0.0.1:9", "secret", "beacon");
         let err = provisioner
-            .managed_key(USER, &BillingEntity::user(USER))
+            .managed_key(USER, &BillingEntity::organization(WORKSPACE))
             .await
             .unwrap_err();
         assert!(matches!(err, ProvisionError::Unavailable(_)));

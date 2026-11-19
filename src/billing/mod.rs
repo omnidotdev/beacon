@@ -12,6 +12,7 @@
 //! the plan tier that picks the default model, all for the user's personal
 //! workspace. Enabled when `BILLING_BASE_URL` is set.
 
+pub mod card_offer;
 pub mod gateway_error;
 pub mod middleware;
 pub mod pricing;
@@ -26,7 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 use synapse_billing::AetherClient;
 
 pub use tier::{GATEWAY_DEFAULT_MODEL, PlanTier};
-pub use workspace::WorkspaceResolver;
+pub use workspace::{WorkspaceError, WorkspaceResolver};
 
 use crate::providers::provisioner::BillingEntity;
 
@@ -56,6 +57,10 @@ const CACHE_TTL_VARS: &[&str] = &["BILLING_CACHE_TTL_SECS", "AETHER_CACHE_TTL_SE
 /// ones JWT validation reads
 const AUTH_BASE_URL_VARS: &[&str] = &["AUTH_BASE_URL", "GATEKEEPER_URL"];
 
+/// Gatekeeper service key env name (Gatekeeper's `BEACON_SERVICE_KEY`), the
+/// one the vault lookups already use
+const GATEKEEPER_SERVICE_KEY_VAR: &str = "GATEKEEPER_SERVICE_KEY";
+
 /// Fail mode used when Aether is unreachable
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailMode {
@@ -78,6 +83,9 @@ pub struct BillingConfig {
     pub cache_ttl_secs: u64,
     /// Gatekeeper base URL, for resolving a user's personal workspace
     pub auth_base_url: Option<String>,
+    /// Gatekeeper service key, for resolving a personal workspace by user id
+    /// when there is no user token (scheduled check-ins, workflows)
+    pub gatekeeper_service_key: Option<SecretString>,
 }
 
 impl BillingConfig {
@@ -121,6 +129,8 @@ impl BillingConfig {
             fail_mode,
             cache_ttl_secs,
             auth_base_url: first(AUTH_BASE_URL_VARS),
+            gatekeeper_service_key: first(&[GATEKEEPER_SERVICE_KEY_VAR])
+                .map(|key| SecretString::new(key.trim().into())),
         }))
     }
 }
@@ -138,6 +148,14 @@ pub struct BillingState {
     pub workspaces: WorkspaceResolver,
     /// Read-only Aether access for the plan display (credit balance)
     balance_reader: Arc<BalanceReader>,
+}
+
+impl BillingState {
+    /// Aether base URL
+    #[must_use]
+    pub fn base_url(&self) -> &url::Url {
+        &self.balance_reader.base_url
+    }
 }
 
 /// Reads a billing entity's credit balance for display. Never checks or
@@ -200,7 +218,16 @@ impl BillingState {
 
         if config.auth_base_url.is_none() {
             tracing::warn!(
-                "AUTH_BASE_URL not set, Beacon bills each user's own account instead of their personal workspace"
+                "AUTH_BASE_URL not set, personal workspaces cannot be resolved and managed AI is disabled"
+            );
+        }
+
+        let mut workspaces = WorkspaceResolver::new(config.auth_base_url.as_deref());
+        if let (Some(url), Some(key)) = (&config.auth_base_url, config.gatekeeper_service_key) {
+            workspaces = workspaces.with_service_lookup(url, key);
+        } else {
+            tracing::warn!(
+                "GATEKEEPER_SERVICE_KEY not set, work without a user token bills only workspaces already cached"
             );
         }
 
@@ -210,9 +237,18 @@ impl BillingState {
             client: Arc::new(client),
             fail_mode: config.fail_mode,
             cache: BillingCache::new(config.cache_ttl_secs),
-            workspaces: WorkspaceResolver::new(config.auth_base_url.as_deref()),
+            workspaces,
             balance_reader: Arc::new(balance_reader),
         })
+    }
+
+    /// Cache each user's resolved personal workspace in Beacon's database, so
+    /// tokenless work after a restart skips the Gatekeeper lookup when the
+    /// disk survived
+    #[must_use]
+    pub fn with_workspace_store(mut self, store: crate::db::BillingWorkspaceRepo) -> Self {
+        self.workspaces = self.workspaces.with_store(store);
+        self
     }
 
     /// A billing entity's credit balance (retail USD), for display only.
@@ -259,10 +295,13 @@ impl BillingState {
     /// Resolve the plan tier of the workspace a user's usage bills (their
     /// personal workspace), cached for the TTL.
     ///
-    /// Any Aether failure resolves to `Free`, so an outage can only make the
-    /// default model cheaper, never more expensive
+    /// An unknown workspace or any Aether failure resolves to `Free`, so it
+    /// can only make the default model cheaper, never more expensive
     pub async fn user_tier(&self, user_id: &str) -> PlanTier {
-        self.entity_tier(&self.workspaces.entity_for(user_id)).await
+        match self.workspaces.resolve_user(user_id).await {
+            Ok(entity) => self.entity_tier(&entity).await,
+            Err(_) => PlanTier::Free,
+        }
     }
 
     /// Resolve a billing entity's plan tier, cached for the TTL
@@ -605,10 +644,12 @@ mod tests {
         .unwrap()
         .unwrap();
         let state = BillingState::from_config(config).unwrap();
-        // A paid user-level row no longer applies once the workspace is known
-        state
-            .cache
-            .put_tier(&BillingEntity::user("u"), PlanTier::Paid);
+        // Another workspace's paid tier never applies to this user
+        state.cache.put_tier(
+            &BillingEntity::organization("team-workspace"),
+            PlanTier::Paid,
+        );
+        assert_eq!(state.user_tier("u").await, PlanTier::Free);
         state.workspaces.remember("u", "personal-workspace");
         state.cache.put_tier(
             &BillingEntity::organization("personal-workspace"),

@@ -593,13 +593,24 @@ impl ApiServerBuilder {
         };
 
         let billing_state = if self.cloud_mode {
-            crate::billing::BillingState::from_env().unwrap_or_else(|e| {
-                tracing::error!(error = %e, "billing initialization failed, running without billing");
-                None
-            })
+            crate::billing::BillingState::from_env()
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "billing initialization failed, running without billing");
+                    None
+                })
+                .map(|billing| {
+                    billing.with_workspace_store(crate::db::BillingWorkspaceRepo::new(
+                        self.db.clone(),
+                    ))
+                })
         } else {
             None
         };
+
+        // Offer the card-verified free AI credits in replies only while live
+        if let Some(billing) = &billing_state {
+            crate::billing::card_offer::spawn_refresh(billing.base_url());
+        }
 
         let db_for_harness = self.db.clone();
         let state = Arc::new(ApiState {

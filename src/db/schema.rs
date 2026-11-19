@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::Result;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 /// Initialize the database schema
 ///
@@ -79,6 +79,9 @@ pub fn init(conn: &Connection) -> Result<()> {
     }
     if version < 21 {
         migrate_v21(conn)?;
+    }
+    if version < 22 {
+        migrate_v22(conn)?;
     }
 
     Ok(())
@@ -681,6 +684,25 @@ fn migrate_v21(conn: &Connection) -> Result<()> {
     )?;
 
     tracing::info!("migrated to schema v21 (harness sessions)");
+    Ok(())
+}
+
+fn migrate_v22(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        -- The personal workspace each Gatekeeper user's usage bills, so work
+        -- without a token (scheduled check-ins, workflows) still bills it
+        CREATE TABLE IF NOT EXISTS billing_workspaces (
+            user_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        PRAGMA user_version = 22;
+        ",
+    )?;
+
+    tracing::info!("migrated to schema v22 (billing workspaces)");
     Ok(())
 }
 

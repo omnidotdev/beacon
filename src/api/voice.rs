@@ -229,14 +229,7 @@ impl IntoResponse for VoiceError {
                 "auth_required",
                 "Authentication required".to_string(),
             ),
-            Self::Managed(failure) => (
-                match failure {
-                    ManagedError::Denied => StatusCode::FORBIDDEN,
-                    ManagedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                },
-                failure.code(),
-                failure.user_message(),
-            ),
+            Self::Managed(failure) => (failure.status(), failure.code(), failure.user_message()),
             Self::Gateway(failure) => (
                 match failure {
                     GatewayFailure::OutOfCredits | GatewayFailure::PaymentRequired => {
@@ -310,9 +303,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_failures_map_to_403_and_503() {
+    async fn managed_failures_map_to_401_403_and_503() {
         let denied = VoiceError::Managed(ManagedError::Denied).into_response();
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let reauth = VoiceError::Managed(ManagedError::ReauthRequired).into_response();
+        assert_eq!(reauth.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(reauth).await["error"]["code"], "reauth_required");
         let unavailable = VoiceError::Managed(ManagedError::Unavailable).into_response();
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
