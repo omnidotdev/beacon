@@ -198,7 +198,7 @@ mod tests {
         // Update
         let updated = TelegramGroupConfig {
             require_mention: Some(false),
-            ..config.clone()
+            ..config
         };
         repo.upsert(&updated).unwrap();
         let fetched = repo.get("-100123456").unwrap().unwrap();

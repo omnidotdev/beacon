@@ -96,11 +96,11 @@ Image descriptions (config `[media] vision_model`, default `anthropic/claude-son
 ```bash
 cargo build
 cargo test
-cargo clippy
+cargo clippy --all-targets
 cargo run -- --foreground -v
 ```
 
-`rust-toolchain.toml` pins the stable toolchain, so local builds and the pre-commit hook (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) match CI. Git dependencies such as agent-core resolve from GitHub at the commits recorded in `Cargo.lock`; no sibling checkout is needed.
+`rust-toolchain.toml` pins the stable toolchain, so local builds and the pre-commit hook (`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, from `.cargo-husky/hooks/pre-commit`) match CI. Clippy covers test code too. Git dependencies such as agent-core resolve from GitHub at the commits recorded in `Cargo.lock`; no sibling checkout is needed.
 
 ## Ecosystem
 

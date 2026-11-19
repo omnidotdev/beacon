@@ -201,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn missing_command_is_rejected() {
         let tool = make_tool();
-        assert!(tool.execute("Bash", r#"{}"#).await.is_err());
+        assert!(tool.execute("Bash", "{}").await.is_err());
         assert!(tool.execute("Bash", r#"{"command": "  "}"#).await.is_err());
     }
 

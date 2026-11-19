@@ -8,6 +8,12 @@ use std::io::Cursor;
 mod common;
 
 /// Generate sine wave audio samples
+// Short, positive sample counts of a small test signal: the casts are exact
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 fn generate_sine_samples(frequency: f32, duration_secs: f32, amplitude: f32) -> Vec<f32> {
     let num_samples = (SAMPLE_RATE as f32 * duration_secs) as usize;
     (0..num_samples)
@@ -19,6 +25,12 @@ fn generate_sine_samples(frequency: f32, duration_secs: f32, amplitude: f32) -> 
 }
 
 /// Generate silence
+// Short, positive sample counts of a small test signal: the casts are exact
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 fn generate_silence(duration_secs: f32) -> Vec<f32> {
     let num_samples = (SAMPLE_RATE as f32 * duration_secs) as usize;
     vec![0.0; num_samples]

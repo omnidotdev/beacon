@@ -1078,9 +1078,9 @@ mod tests {
         use crate::tools::ToolKind;
         use crate::tools::executor::classify;
 
-        let names = vec!["Read", "Bash", "Glob", "Write", "WebSearch"];
+        let names = ["Read", "Bash", "Glob", "Write", "WebSearch"];
         let (reads, mutates): (Vec<&&str>, Vec<&&str>) =
-            names.iter().partition(|n| classify(*n) == ToolKind::Read);
+            names.iter().partition(|n| classify(n) == ToolKind::Read);
 
         assert_eq!(reads, vec![&"Read", &"Glob", &"WebSearch"]);
         assert_eq!(mutates, vec![&"Bash", &"Write"]);
@@ -1101,11 +1101,5 @@ mod tests {
         assert_eq!(parsed.question, "Which env?");
         assert_eq!(parsed.options.unwrap().len(), 2);
         assert!(!parsed.multi_select);
-    }
-
-    #[test]
-    fn post_turn_indexing_does_not_require_indexer() {
-        // Documents that the indexing block is guarded by Option — requests succeed without indexer
-        assert!(true);
     }
 }

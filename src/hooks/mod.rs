@@ -256,7 +256,7 @@ mod tests {
             thread_id: None,
             session_id: None,
             response: None,
-            context: Default::default(),
+            context: HashMap::default(),
         };
 
         let result = manager.trigger(&event).await;
@@ -332,7 +332,7 @@ mod tests {
             thread_id: None,
             session_id: None,
             response: None,
-            context: Default::default(),
+            context: HashMap::default(),
         };
 
         let result = manager.trigger(&event).await;

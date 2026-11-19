@@ -554,6 +554,6 @@ Let me know if you need more details.";
         // "e.g." has periods but no space after the final one in the right pattern
         let segments = split_on_sentences("Use e.g. foo");
         // Splits on ". " after "e.g" — this is expected (not abbreviation-aware)
-        assert!(segments.len() >= 1);
+        assert!(!segments.is_empty());
     }
 }
