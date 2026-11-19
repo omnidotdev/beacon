@@ -197,35 +197,64 @@ async fn handle_socket(
     }
 
     // Check conversations limit when billing is enabled, against the
-    // workspace the user's usage bills (their personal workspace)
+    // workspace the user's usage bills (their personal workspace). The user
+    // entity is never metered instead: a token without the personal
+    // workspace must sign in again
     if let (Some(billing_state), Some(user_id)) = (&state.billing_state, &gatekeeper_user_id) {
         let entity = match &token {
             Some(token) => billing_state.workspaces.resolve(user_id, token).await,
-            None => billing_state.workspaces.entity_for(user_id),
+            None => billing_state
+                .workspaces
+                .entity_for(user_id)
+                .ok_or(crate::billing::WorkspaceError::ReauthRequired),
         };
-        match crate::billing::middleware::check_conversations_usage(
-            billing_state,
-            entity.kind(),
-            &entity.entity_id,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
+        let entity = match entity {
+            Ok(entity) => Some(entity),
+            Err(crate::billing::WorkspaceError::ReauthRequired) => {
+                let failure = super::managed::ManagedError::ReauthRequired;
                 let error = WsOutgoing::Error {
-                    code: "conversations_limit".to_string(),
-                    message: "Conversation limit reached for your plan".to_string(),
+                    code: failure.code().to_string(),
+                    message: failure.user_message(),
                 };
                 if let Ok(msg) = serde_json::to_string(&error) {
                     let _ = sender.send(Message::Text(msg.into())).await;
                 }
                 return;
             }
-            Err(e) => {
+            Err(crate::billing::WorkspaceError::Unavailable) => {
+                // Managed AI fails closed on its own until the workspace is known
                 tracing::warn!(
-                    error = %e,
-                    "Aether unreachable for conversations check, allowing through"
+                    user_id = %user_id,
+                    "personal workspace unavailable for conversations check, allowing through"
                 );
+                None
+            }
+        };
+        if let Some(entity) = entity {
+            match crate::billing::middleware::check_conversations_usage(
+                billing_state,
+                entity.kind(),
+                &entity.entity_id,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let error = WsOutgoing::Error {
+                        code: "conversations_limit".to_string(),
+                        message: "Conversation limit reached for your plan".to_string(),
+                    };
+                    if let Ok(msg) = serde_json::to_string(&error) {
+                        let _ = sender.send(Message::Text(msg.into())).await;
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Aether unreachable for conversations check, allowing through"
+                    );
+                }
             }
         }
     }

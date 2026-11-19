@@ -3,25 +3,29 @@
 //! Omni bills workspaces: plans are bought for a workspace on the account hub,
 //! and a user's personal workspace stands in for the individual. Beacon is a
 //! personal assistant, so its plan, entitlements, meters, and managed AI
-//! (credits included) all bill the signed-in user's personal workspace.
+//! (credits included) all bill the signed-in user's personal workspace, and
+//! never the user entity: a user-level balance would split the plan, miss the
+//! card-verified free allowance, and drain a balance nobody tops up.
 //!
 //! Access tokens carry organization ids only, so the personal workspace is
 //! read from Gatekeeper's userinfo (which keeps each organization's `type`)
-//! with the user's own token, then cached per user. Work that runs without a
-//! token (scheduled check-ins, workflows) uses the cached workspace, and falls
-//! back to the user's own account until one is known
+//! with the user's own token, then cached per user and recorded in Beacon's
+//! database. Work that runs without a token (scheduled check-ins, workflows)
+//! uses the recorded workspace. Until one is known, nothing is billed and the
+//! caller fails closed (the user signs in again)
 
 use std::time::Duration;
 
 use mini_moka::sync::Cache;
 
+use crate::db::BillingWorkspaceRepo;
 use crate::providers::provisioner::BillingEntity;
 
 /// Suffix of the namespaced organizations claim (`<namespace>/organizations`)
 const ORGANIZATIONS_CLAIM_SUFFIX: &str = "/claims/organizations";
 
-/// How long a resolved personal workspace is reused. A user's personal
-/// workspace never changes, so this only bounds memory
+/// How long a resolved personal workspace is reused from memory. A user's
+/// personal workspace never changes, so this only bounds memory
 const PERSONAL_WORKSPACE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long a failed lookup is remembered, so an outage or a token without the
@@ -30,6 +34,16 @@ const MISS_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Userinfo request timeout
 const USERINFO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why a user's personal workspace could not be resolved
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceError {
+    /// The user's token names no personal workspace (issued without the
+    /// `organization` scope): they must sign in again
+    ReauthRequired,
+    /// The lookup failed or is not configured: nothing can be billed for now
+    Unavailable,
+}
 
 /// Read the personal workspace id from a Gatekeeper userinfo response.
 ///
@@ -52,18 +66,29 @@ pub fn personal_workspace_id(userinfo: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Cache key for a token's failed lookup (a hash, so tokens are not kept)
+fn token_key(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Resolves the workspace a user's Beacon usage bills
 #[derive(Clone)]
 pub struct WorkspaceResolver {
     userinfo_url: Option<String>,
     http: reqwest::Client,
     personal: Cache<String, String>,
-    misses: Cache<String, ()>,
+    misses: Cache<u64, WorkspaceError>,
+    store: Option<BillingWorkspaceRepo>,
 }
 
 impl WorkspaceResolver {
     /// Create a resolver against Gatekeeper at `auth_base_url`. Without one
-    /// nothing can be resolved and every user bills their own account
+    /// nothing can be resolved, so nobody is billed and managed AI fails
+    /// closed
     #[must_use]
     pub fn new(auth_base_url: Option<&str>) -> Self {
         let userinfo_url = auth_base_url
@@ -87,62 +112,101 @@ impl WorkspaceResolver {
                 .max_capacity(10_000)
                 .time_to_live(MISS_TTL)
                 .build(),
+            store: None,
         }
     }
 
-    /// The entity a user's usage bills, from what is already known: their
-    /// personal workspace once resolved, otherwise their own account
+    /// Record resolved workspaces in Beacon's database, so tokenless work
+    /// keeps billing them across restarts
     #[must_use]
-    pub fn entity_for(&self, user_id: &str) -> BillingEntity {
-        self.personal
-            .get(&user_id.to_string())
-            .map_or_else(|| BillingEntity::user(user_id), BillingEntity::organization)
+    pub fn with_store(mut self, store: BillingWorkspaceRepo) -> Self {
+        self.store = Some(store);
+        self
     }
 
-    /// Resolve (and remember) the user's personal workspace with their own
-    /// token, then return the entity their usage bills. Any lookup failure
-    /// bills the user's own account
-    pub async fn resolve(&self, user_id: &str, token: &str) -> BillingEntity {
+    /// The workspace a user's usage bills, from what is already known: their
+    /// personal workspace once resolved (in memory or recorded). `None` until
+    /// one is known, and the caller must then bill nothing
+    #[must_use]
+    pub fn entity_for(&self, user_id: &str) -> Option<BillingEntity> {
         let key = user_id.to_string();
 
         if let Some(workspace_id) = self.personal.get(&key) {
-            return BillingEntity::organization(workspace_id);
+            return Some(BillingEntity::organization(workspace_id));
         }
 
-        if self.misses.get(&key).is_some() {
-            return BillingEntity::user(user_id);
+        let recorded = self.store.as_ref().and_then(|store| {
+            store
+                .get(user_id)
+                .map_err(|e| {
+                    tracing::warn!(user_id = %user_id, error = %e, "billing workspace read failed");
+                })
+                .ok()
+                .flatten()
+        })?;
+
+        self.personal.insert(key, recorded.clone());
+        Some(BillingEntity::organization(recorded))
+    }
+
+    /// Resolve (and remember) the user's personal workspace with their own
+    /// token, then return the entity their usage bills
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError::ReauthRequired`] when the token names no
+    /// personal workspace, and [`WorkspaceError::Unavailable`] when the
+    /// lookup fails. The user entity is never billed instead
+    pub async fn resolve(
+        &self,
+        user_id: &str,
+        token: &str,
+    ) -> Result<BillingEntity, WorkspaceError> {
+        if let Some(entity) = self.entity_for(user_id) {
+            return Ok(entity);
+        }
+
+        // Misses are keyed by token, so signing in again is retried at once
+        let miss_key = token_key(token);
+        if let Some(error) = self.misses.get(&miss_key) {
+            return Err(error);
         }
 
         match self.fetch_personal_workspace(token).await {
             Ok(Some(workspace_id)) => {
                 self.remember(user_id, &workspace_id);
-                BillingEntity::organization(workspace_id)
+                Ok(BillingEntity::organization(workspace_id))
             }
             Ok(None) => {
                 tracing::warn!(
                     user_id = %user_id,
-                    "no personal workspace in userinfo, billing the user's own account"
+                    "no personal workspace in userinfo, the user must sign in again"
                 );
-                self.misses.insert(key, ());
-                BillingEntity::user(user_id)
+                self.misses.insert(miss_key, WorkspaceError::ReauthRequired);
+                Err(WorkspaceError::ReauthRequired)
             }
             Err(e) => {
                 tracing::warn!(
                     user_id = %user_id,
                     error = %e,
-                    "personal workspace lookup failed, billing the user's own account"
+                    "personal workspace lookup failed, billing nothing"
                 );
-                self.misses.insert(key, ());
-                BillingEntity::user(user_id)
+                self.misses.insert(miss_key, WorkspaceError::Unavailable);
+                Err(WorkspaceError::Unavailable)
             }
         }
     }
 
     /// Record a user's personal workspace
     pub fn remember(&self, user_id: &str, workspace_id: &str) {
-        let key = user_id.to_string();
-        self.misses.invalidate(&key);
-        self.personal.insert(key, workspace_id.to_string());
+        self.personal
+            .insert(user_id.to_string(), workspace_id.to_string());
+
+        if let Some(store) = &self.store
+            && let Err(e) = store.set(user_id, workspace_id)
+        {
+            tracing::warn!(user_id = %user_id, error = %e, "billing workspace write failed");
+        }
     }
 
     async fn fetch_personal_workspace(&self, token: &str) -> Result<Option<String>, String> {
@@ -240,21 +304,35 @@ mod tests {
     }
 
     #[test]
-    fn unknown_users_bill_their_own_account() {
+    fn unknown_users_bill_nothing() {
         let resolver = WorkspaceResolver::new(None);
-        let entity = resolver.entity_for(USER);
-        assert_eq!(entity.entity_type, BillingEntityType::User);
-        assert_eq!(entity.entity_id, USER);
+        assert_eq!(resolver.entity_for(USER), None);
     }
 
     #[test]
     fn remembered_users_bill_their_personal_workspace() {
         let resolver = WorkspaceResolver::new(None);
         resolver.remember(USER, PERSONAL);
-        let entity = resolver.entity_for(USER);
+        let entity = resolver.entity_for(USER).unwrap();
         assert_eq!(entity.entity_type, BillingEntityType::Organization);
         assert_eq!(entity.entity_id, PERSONAL);
         assert_eq!(entity.kind(), "organization");
+    }
+
+    #[test]
+    fn a_recorded_workspace_survives_a_restart() {
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
+
+        WorkspaceResolver::new(None)
+            .with_store(store.clone())
+            .remember(USER, PERSONAL);
+
+        // A fresh resolver (a restarted gateway) reads it back for tokenless work
+        let restarted = WorkspaceResolver::new(None).with_store(store);
+        assert_eq!(
+            restarted.entity_for(USER),
+            Some(BillingEntity::organization(PERSONAL))
+        );
     }
 
     #[derive(Clone)]
@@ -298,31 +376,78 @@ mod tests {
         let resolver = WorkspaceResolver::new(Some(&base));
 
         let entity = resolver.resolve(USER, "user-token").await;
-        assert_eq!(entity, BillingEntity::organization(PERSONAL));
+        assert_eq!(entity, Ok(BillingEntity::organization(PERSONAL)));
 
         // Cached for later requests and for tokenless work
         let again = resolver.resolve(USER, "user-token").await;
-        assert_eq!(again, BillingEntity::organization(PERSONAL));
+        assert_eq!(again, Ok(BillingEntity::organization(PERSONAL)));
         assert_eq!(
             resolver.entity_for(USER),
-            BillingEntity::organization(PERSONAL)
+            Some(BillingEntity::organization(PERSONAL))
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn a_failed_lookup_bills_the_user_and_is_not_retried_at_once() {
+    async fn a_failed_lookup_bills_nothing_and_is_not_retried_at_once() {
         let (base, calls) = spawn_gatekeeper(StatusCode::INTERNAL_SERVER_ERROR).await;
         let resolver = WorkspaceResolver::new(Some(&base));
 
         assert_eq!(
             resolver.resolve(USER, "user-token").await,
-            BillingEntity::user(USER)
+            Err(WorkspaceError::Unavailable)
         );
         assert_eq!(
             resolver.resolve(USER, "user-token").await,
-            BillingEntity::user(USER)
+            Err(WorkspaceError::Unavailable)
+        );
+        assert_eq!(resolver.entity_for(USER), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_token_without_a_personal_workspace_asks_for_a_new_sign_in() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let app = Router::new().route(
+            "/oauth2/userinfo",
+            get(move |headers: HeaderMap| {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let token = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    if token == "Bearer fresh-token" {
+                        Json(userinfo())
+                    } else {
+                        Json(serde_json::json!({ "sub": USER }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let resolver = WorkspaceResolver::new(Some(&format!("http://{addr}")));
+
+        assert_eq!(
+            resolver.resolve(USER, "scopeless-token").await,
+            Err(WorkspaceError::ReauthRequired)
+        );
+        assert_eq!(
+            resolver.resolve(USER, "scopeless-token").await,
+            Err(WorkspaceError::ReauthRequired)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Signing in again yields a new token, which is looked up at once
+        assert_eq!(
+            resolver.resolve(USER, "fresh-token").await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
     }
 }

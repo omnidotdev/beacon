@@ -1,6 +1,7 @@
 // TODO: evaluate migrating from rusqlite to embedded Postgres (e.g. pglite-rs
 // or embedded-postgres) for schema parity with server-side Postgres services
 
+pub mod billing_workspace;
 pub mod embedder;
 pub mod indexer;
 pub mod knowledge;
@@ -50,6 +51,7 @@ pub(crate) fn register_sqlite_vec() {
     });
 }
 
+pub use billing_workspace::BillingWorkspaceRepo;
 pub use embedder::{EMBEDDING_DIM, Embedder};
 pub use indexer::{ExtractedFact, ExtractionResponse, Indexer};
 pub use knowledge::{KnowledgePackRepo, KnowledgePackRow};

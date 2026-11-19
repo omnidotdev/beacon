@@ -12,16 +12,17 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use super::ApiState;
+use crate::billing::WorkspaceError;
 use crate::billing::tier::tier_name;
 
 /// Plan summary for the signed-in user
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanResponse {
-    /// Entity the plan belongs to (`organization` for a workspace, `user`
-    /// before the personal workspace is known)
+    /// Entity the plan belongs to: always `organization` (the personal
+    /// workspace)
     pub entity_type: &'static str,
-    /// Workspace id when the plan belongs to a workspace
+    /// The personal workspace id. Kept optional for older clients
     pub workspace_id: Option<String>,
     /// Plan tier name (`free`, `pro`, `team`), `None` when unknown
     pub tier: Option<String>,
@@ -57,7 +58,21 @@ async fn get_plan(headers: HeaderMap, State(state): State<Arc<ApiState>>) -> Res
         return (StatusCode::UNAUTHORIZED, "sign in to see your plan").into_response();
     };
 
-    let entity = billing.workspaces.resolve(&claims.sub, token).await;
+    // The plan belongs to the personal workspace; the user entity is never
+    // shown instead
+    let entity = match billing.workspaces.resolve(&claims.sub, token).await {
+        Ok(entity) => entity,
+        Err(WorkspaceError::ReauthRequired) => {
+            return (StatusCode::UNAUTHORIZED, "sign in again to see your plan").into_response();
+        }
+        Err(WorkspaceError::Unavailable) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "your plan is unavailable right now",
+            )
+                .into_response();
+        }
+    };
 
     let (entitlements, credit_balance) = tokio::join!(
         billing
@@ -79,9 +94,7 @@ async fn get_plan(headers: HeaderMap, State(state): State<Arc<ApiState>>) -> Res
         None
     });
 
-    let workspace_id = (entity.entity_type
-        == crate::providers::provisioner::BillingEntityType::Organization)
-        .then(|| entity.entity_id.clone());
+    let workspace_id = Some(entity.entity_id.clone());
 
     Json(PlanResponse {
         entity_type: entity.kind(),

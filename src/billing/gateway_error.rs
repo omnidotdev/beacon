@@ -58,8 +58,8 @@ impl GatewayFailure {
     #[must_use]
     pub fn user_message(self) -> String {
         match self {
-            Self::OutOfCredits => out_of_credits_message(&billing_url()),
-            Self::PaymentRequired => payment_required_message(&billing_url()),
+            Self::OutOfCredits => with_card_offer(out_of_credits_message(&billing_url())),
+            Self::PaymentRequired => with_card_offer(payment_required_message(&billing_url())),
             Self::Unavailable | Self::Unauthorized => UNAVAILABLE_MESSAGE.to_string(),
         }
     }
@@ -141,6 +141,27 @@ pub fn payment_required_message(billing_url: &str) -> String {
         "Beacon AI runs on AI credits. Buy credits or upgrade to Pro to start, \
          or use your own API key: {billing_url}"
     )
+}
+
+/// Append the card-verified free AI credits offer while it is live
+fn with_card_offer(message: String) -> String {
+    append_card_offer(
+        message,
+        super::card_offer::current(),
+        &super::card_offer::add_card_url(),
+    )
+}
+
+/// Append the "Add a card" line to a reply when there is a live offer
+#[must_use]
+pub fn append_card_offer(message: String, offer: Option<u64>, add_card_url: &str) -> String {
+    match offer {
+        Some(credits) => format!(
+            "{message}\n\n{}",
+            super::card_offer::add_card_line(credits, add_card_url)
+        ),
+        None => message,
+    }
 }
 
 /// Reply text for a messaging channel (Telegram, Slack, Teams, etc.) after a
@@ -246,6 +267,20 @@ mod tests {
         assert_eq!(classify("429 rate_limit_error: rate limit exceeded"), None);
         // A longer number containing 402 is not a status token
         assert_eq!(classify("upstream error: request 14021 failed"), None);
+    }
+
+    #[test]
+    fn short_credit_replies_offer_a_card_only_while_live() {
+        let url = "https://account.omni.dev/billing?tab=ai&product=beacon";
+        let base = out_of_credits_message("https://beacon.omni.dev/settings");
+
+        assert_eq!(append_card_offer(base.clone(), None, url), base);
+
+        let offered = append_card_offer(base.clone(), Some(50), url);
+        assert!(offered.starts_with(&base));
+        assert!(offered.ends_with(
+            "Add a card to unlock 50 free AI credits a month: https://account.omni.dev/billing?tab=ai&product=beacon"
+        ));
     }
 
     #[test]
