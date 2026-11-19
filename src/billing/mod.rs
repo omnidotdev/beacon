@@ -57,6 +57,10 @@ const CACHE_TTL_VARS: &[&str] = &["BILLING_CACHE_TTL_SECS", "AETHER_CACHE_TTL_SE
 /// ones JWT validation reads
 const AUTH_BASE_URL_VARS: &[&str] = &["AUTH_BASE_URL", "GATEKEEPER_URL"];
 
+/// Gatekeeper service key env name (Gatekeeper's `BEACON_SERVICE_KEY`), the
+/// one the vault lookups already use
+const GATEKEEPER_SERVICE_KEY_VAR: &str = "GATEKEEPER_SERVICE_KEY";
+
 /// Fail mode used when Aether is unreachable
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailMode {
@@ -79,6 +83,9 @@ pub struct BillingConfig {
     pub cache_ttl_secs: u64,
     /// Gatekeeper base URL, for resolving a user's personal workspace
     pub auth_base_url: Option<String>,
+    /// Gatekeeper service key, for resolving a personal workspace by user id
+    /// when there is no user token (scheduled check-ins, workflows)
+    pub gatekeeper_service_key: Option<SecretString>,
 }
 
 impl BillingConfig {
@@ -122,6 +129,8 @@ impl BillingConfig {
             fail_mode,
             cache_ttl_secs,
             auth_base_url: first(AUTH_BASE_URL_VARS),
+            gatekeeper_service_key: first(&[GATEKEEPER_SERVICE_KEY_VAR])
+                .map(|key| SecretString::new(key.trim().into())),
         }))
     }
 }
@@ -213,19 +222,29 @@ impl BillingState {
             );
         }
 
+        let mut workspaces = WorkspaceResolver::new(config.auth_base_url.as_deref());
+        if let (Some(url), Some(key)) = (&config.auth_base_url, config.gatekeeper_service_key) {
+            workspaces = workspaces.with_service_lookup(url, key);
+        } else {
+            tracing::warn!(
+                "GATEKEEPER_SERVICE_KEY not set, work without a user token bills only workspaces already cached"
+            );
+        }
+
         tracing::info!(app_id = BEACON_APP_ID, "Aether billing enabled");
 
         Ok(Self {
             client: Arc::new(client),
             fail_mode: config.fail_mode,
             cache: BillingCache::new(config.cache_ttl_secs),
-            workspaces: WorkspaceResolver::new(config.auth_base_url.as_deref()),
+            workspaces,
             balance_reader: Arc::new(balance_reader),
         })
     }
 
-    /// Record each user's resolved personal workspace in Beacon's database,
-    /// so tokenless work keeps billing it across restarts
+    /// Cache each user's resolved personal workspace in Beacon's database, so
+    /// tokenless work after a restart skips the Gatekeeper lookup when the
+    /// disk survived
     #[must_use]
     pub fn with_workspace_store(mut self, store: crate::db::BillingWorkspaceRepo) -> Self {
         self.workspaces = self.workspaces.with_store(store);
@@ -279,9 +298,9 @@ impl BillingState {
     /// An unknown workspace or any Aether failure resolves to `Free`, so it
     /// can only make the default model cheaper, never more expensive
     pub async fn user_tier(&self, user_id: &str) -> PlanTier {
-        match self.workspaces.entity_for(user_id) {
-            Some(entity) => self.entity_tier(&entity).await,
-            None => PlanTier::Free,
+        match self.workspaces.resolve_user(user_id).await {
+            Ok(entity) => self.entity_tier(&entity).await,
+            Err(_) => PlanTier::Free,
         }
     }
 

@@ -97,23 +97,30 @@ impl From<WorkspaceError> for ManagedError {
 /// Omni bills workspaces, and a user's personal workspace stands in for the
 /// individual, so the personal workspace pays (its plan's entitlements,
 /// included credits, and card-verified free allowance apply). The user entity
-/// is never billed: until the workspace is known nothing is billed and the
-/// user must sign in again, and without billing managed AI is unavailable
+/// is never billed: the workspace comes from cache or, when none is cached
+/// (e.g. after a restart), from Gatekeeper's server-side lookup by user id.
+/// Without billing configured managed AI is unavailable
 ///
 /// # Errors
 ///
-/// Returns [`ManagedError::ReauthRequired`] when the workspace is unknown and
-/// [`ManagedError::Unavailable`] when billing is not configured
-pub fn billing_entity_for(state: &ApiState, user_id: &str) -> Result<BillingEntity, ManagedError> {
+/// Returns [`ManagedError::ReauthRequired`] when Gatekeeper knows no personal
+/// workspace for the user (or no lookup is configured and none is cached), and
+/// [`ManagedError::Unavailable`] when billing is not configured or the lookup
+/// itself fails
+pub async fn billing_entity_for(
+    state: &ApiState,
+    user_id: &str,
+) -> Result<BillingEntity, ManagedError> {
     let Some(billing) = &state.billing_state else {
         tracing::warn!(user_id = %user_id, "managed AI requested but billing is not configured");
         return Err(ManagedError::Unavailable);
     };
 
-    billing.workspaces.entity_for(user_id).ok_or_else(|| {
-        tracing::warn!(user_id = %user_id, "managed AI requested before the personal workspace is known");
-        ManagedError::ReauthRequired
-    })
+    billing
+        .workspaces
+        .resolve_user(user_id)
+        .await
+        .map_err(ManagedError::from)
 }
 
 /// Base URL of the Synapse gateway managed requests go to
@@ -138,7 +145,7 @@ pub async fn managed_gateway_key(
         return Err(ManagedError::Unavailable);
     };
 
-    let entity = billing_entity_for(state, user_id)?;
+    let entity = billing_entity_for(state, user_id).await?;
     provisioner
         .managed_key(user_id, &entity)
         .await
@@ -243,7 +250,10 @@ pub async fn memory_ai_for(
 pub fn note_gateway_failure(state: &ApiState, user_id: &str, failure: GatewayFailure) {
     if failure == GatewayFailure::Unauthorized
         && let Some(provisioner) = &state.key_provisioner
-        && let Ok(entity) = billing_entity_for(state, user_id)
+        && let Some(entity) = state
+            .billing_state
+            .as_ref()
+            .and_then(|billing| billing.workspaces.entity_for(user_id))
     {
         provisioner.invalidate(user_id, &entity);
     }

@@ -8,15 +8,19 @@
 //! card-verified free allowance, and drain a balance nobody tops up.
 //!
 //! Access tokens carry organization ids only, so the personal workspace is
-//! read from Gatekeeper's userinfo (which keeps each organization's `type`)
-//! with the user's own token, then cached per user and recorded in Beacon's
-//! database. Work that runs without a token (scheduled check-ins, workflows)
-//! uses the recorded workspace. Until one is known, nothing is billed and the
-//! caller fails closed (the user signs in again)
+//! resolved server-side from Gatekeeper by user id (the Beacon service key,
+//! `GET /api/user/personal-workspace`), falling back to Gatekeeper's userinfo
+//! with the user's own token when the service lookup is not configured or
+//! fails. A resolved workspace is cached in memory and in Beacon's database,
+//! but the database is only a cache: work that runs without a token
+//! (scheduled check-ins, workflows) asks Gatekeeper again when nothing is
+//! cached, e.g. after a restart on a fresh disk. Nothing is ever billed to the
+//! user entity: when every lookup fails the caller fails closed
 
 use std::time::Duration;
 
 use mini_moka::sync::Cache;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::db::BillingWorkspaceRepo;
 use crate::providers::provisioner::BillingEntity;
@@ -32,7 +36,11 @@ const PERSONAL_WORKSPACE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// organization scope does not cost a userinfo call on every request
 const MISS_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// Userinfo request timeout
+/// How long a failed server-side lookup for a user is remembered, so an
+/// outage does not cost a Gatekeeper call on every tokenless turn
+const USER_MISS_TTL: Duration = Duration::from_secs(60);
+
+/// Gatekeeper request timeout (userinfo and the service lookup)
 const USERINFO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why a user's personal workspace could not be resolved
@@ -75,13 +83,30 @@ fn token_key(token: &str) -> u64 {
     hasher.finish()
 }
 
+/// Gatekeeper's server-side personal workspace lookup, authorized by the
+/// Beacon service key
+#[derive(Clone)]
+struct ServiceLookup {
+    url: String,
+    service_key: SecretString,
+}
+
+/// Outcome of a server-side lookup
+enum Lookup {
+    Found(String),
+    /// Gatekeeper knows no personal workspace for the user
+    NotFound,
+}
+
 /// Resolves the workspace a user's Beacon usage bills
 #[derive(Clone)]
 pub struct WorkspaceResolver {
     userinfo_url: Option<String>,
+    service: Option<ServiceLookup>,
     http: reqwest::Client,
     personal: Cache<String, String>,
     misses: Cache<u64, WorkspaceError>,
+    user_misses: Cache<String, WorkspaceError>,
     store: Option<BillingWorkspaceRepo>,
 }
 
@@ -103,6 +128,7 @@ impl WorkspaceResolver {
 
         Self {
             userinfo_url,
+            service: None,
             http,
             personal: Cache::builder()
                 .max_capacity(100_000)
@@ -112,8 +138,27 @@ impl WorkspaceResolver {
                 .max_capacity(10_000)
                 .time_to_live(MISS_TTL)
                 .build(),
+            user_misses: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(USER_MISS_TTL)
+                .build(),
             store: None,
         }
+    }
+
+    /// Resolve personal workspaces server-side from Gatekeeper at
+    /// `gatekeeper_url` with the Beacon service key, so work without a user
+    /// token can resolve one too. A blank URL leaves the lookup off
+    #[must_use]
+    pub fn with_service_lookup(mut self, gatekeeper_url: &str, service_key: SecretString) -> Self {
+        let base = gatekeeper_url.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            self.service = Some(ServiceLookup {
+                url: format!("{base}/api/user/personal-workspace"),
+                service_key,
+            });
+        }
+        self
     }
 
     /// Record resolved workspaces in Beacon's database, so tokenless work
@@ -124,9 +169,9 @@ impl WorkspaceResolver {
         self
     }
 
-    /// The workspace a user's usage bills, from what is already known: their
-    /// personal workspace once resolved (in memory or recorded). `None` until
-    /// one is known, and the caller must then bill nothing
+    /// The workspace a user's usage bills, from cache only (memory, then the
+    /// database). `None` when nothing is cached; callers that may bill use
+    /// [`Self::resolve_user`] or [`Self::resolve`], which ask Gatekeeper
     #[must_use]
     pub fn entity_for(&self, user_id: &str) -> Option<BillingEntity> {
         let key = user_id.to_string();
@@ -166,6 +211,15 @@ impl WorkspaceResolver {
             return Ok(entity);
         }
 
+        // The server-side lookup answers for the user id; only when it is
+        // off or fails does the user's own token get a turn
+        if self.service.is_some() {
+            match self.resolve_user(user_id).await {
+                Err(WorkspaceError::Unavailable) => {}
+                resolved => return resolved,
+            }
+        }
+
         // Misses are keyed by token, so signing in again is retried at once
         let miss_key = token_key(token);
         if let Some(error) = self.misses.get(&miss_key) {
@@ -197,6 +251,53 @@ impl WorkspaceResolver {
         }
     }
 
+    /// Resolve the workspace a user's usage bills without their token (work
+    /// that runs on its own, such as scheduled check-ins and workflows):
+    /// from cache, else server-side from Gatekeeper, remembering the answer
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError::ReauthRequired`] when Gatekeeper knows no
+    /// personal workspace for the user, or when nothing is cached and the
+    /// service lookup is not configured (the user's next sign-in resolves it).
+    /// Returns [`WorkspaceError::Unavailable`] when the lookup itself fails.
+    /// The user entity is never billed instead
+    pub async fn resolve_user(&self, user_id: &str) -> Result<BillingEntity, WorkspaceError> {
+        if let Some(entity) = self.entity_for(user_id) {
+            return Ok(entity);
+        }
+
+        let Some(service) = &self.service else {
+            return Err(WorkspaceError::ReauthRequired);
+        };
+
+        let key = user_id.to_string();
+        if let Some(error) = self.user_misses.get(&key) {
+            return Err(error);
+        }
+
+        match self.fetch_by_user_id(service, user_id).await {
+            Ok(Lookup::Found(workspace_id)) => {
+                self.remember(user_id, &workspace_id);
+                Ok(BillingEntity::organization(workspace_id))
+            }
+            Ok(Lookup::NotFound) => {
+                tracing::warn!(user_id = %user_id, "Gatekeeper knows no personal workspace for the user");
+                self.user_misses.insert(key, WorkspaceError::ReauthRequired);
+                Err(WorkspaceError::ReauthRequired)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    error = %e,
+                    "personal workspace service lookup failed, billing nothing"
+                );
+                self.user_misses.insert(key, WorkspaceError::Unavailable);
+                Err(WorkspaceError::Unavailable)
+            }
+        }
+    }
+
     /// Record a user's personal workspace
     pub fn remember(&self, user_id: &str, workspace_id: &str) {
         self.personal
@@ -207,6 +308,41 @@ impl WorkspaceResolver {
         {
             tracing::warn!(user_id = %user_id, error = %e, "billing workspace write failed");
         }
+    }
+
+    async fn fetch_by_user_id(
+        &self,
+        service: &ServiceLookup,
+        user_id: &str,
+    ) -> Result<Lookup, String> {
+        let response = self
+            .http
+            .get(&service.url)
+            .query(&[("sub", user_id)])
+            .bearer_auth(service.service_key.expose_secret())
+            .send()
+            .await
+            .map_err(|e| format!("lookup request failed: {e}"))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Lookup::NotFound);
+        }
+        if !status.is_success() {
+            return Err(format!("lookup returned {status}"));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("invalid lookup response: {e}"))?;
+
+        body.pointer("/data/id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| Lookup::Found(id.to_string()))
+            .ok_or_else(|| "lookup response carried no workspace id".to_string())
     }
 
     async fn fetch_personal_workspace(&self, token: &str) -> Result<Option<String>, String> {
@@ -447,6 +583,188 @@ mod tests {
         // Signing in again yields a new token, which is looked up at once
         assert_eq!(
             resolver.resolve(USER, "fresh-token").await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+    }
+
+    const SERVICE_KEY: &str = "beacon-service-key";
+
+    /// A Gatekeeper serving the server-side lookup (answering `lookup_status`
+    /// for the known user) and a userinfo that always fails, so a test passes
+    /// only if the service lookup carried it
+    async fn spawn_service_gatekeeper(lookup_status: StatusCode) -> (String, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let app = Router::new()
+            .route(
+                "/api/user/personal-workspace",
+                get(
+                    move |headers: HeaderMap,
+                          axum::extract::Query(query): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >| {
+                        let counter = Arc::clone(&counter);
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            let authorized = headers.get("authorization").and_then(|v| v.to_str().ok())
+                                == Some(&format!("Bearer {SERVICE_KEY}"));
+                            if !authorized {
+                                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+                            }
+                            if query.get("sub").map(String::as_str) != Some(USER) {
+                                return (StatusCode::NOT_FOUND, Json(serde_json::json!({})));
+                            }
+                            (
+                                lookup_status,
+                                Json(serde_json::json!({ "data": { "id": PERSONAL, "slug": "claude" } })),
+                            )
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/oauth2/userinfo",
+                get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({}))) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
+    fn service_resolver(base: &str) -> WorkspaceResolver {
+        WorkspaceResolver::new(Some(base))
+            .with_service_lookup(base, SecretString::new(SERVICE_KEY.into()))
+    }
+
+    #[tokio::test]
+    async fn tokenless_work_after_a_restart_on_a_fresh_disk_bills_the_personal_workspace() {
+        let (base, calls) = spawn_service_gatekeeper(StatusCode::OK).await;
+
+        // Before the restart: resolved and cached in memory and the database
+        let before = service_resolver(&base)
+            .with_store(BillingWorkspaceRepo::new(crate::db::init_memory().unwrap()));
+        assert_eq!(
+            before.resolve_user(USER).await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+
+        // After the restart: no memory and an empty database (the disk did
+        // not survive), and no user token: Gatekeeper resolves it by user id
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
+        let restarted = service_resolver(&base).with_store(store.clone());
+        assert_eq!(restarted.entity_for(USER), None);
+        assert_eq!(
+            restarted.resolve_user(USER).await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Cached again, in the database too, so later turns skip the lookup
+        assert_eq!(store.get(USER).unwrap().as_deref(), Some(PERSONAL));
+        assert_eq!(
+            restarted.resolve_user(USER).await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_surviving_cache_skips_the_lookup_after_a_restart() {
+        let (base, calls) = spawn_service_gatekeeper(StatusCode::OK).await;
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
+        store.set(USER, PERSONAL).unwrap();
+
+        let restarted = service_resolver(&base).with_store(store);
+        assert_eq!(
+            restarted.resolve_user(USER).await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_service_lookup_fails_closed_and_is_not_retried_at_once() {
+        let (base, calls) = spawn_service_gatekeeper(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let resolver = service_resolver(&base);
+
+        assert_eq!(
+            resolver.resolve_user(USER).await,
+            Err(WorkspaceError::Unavailable)
+        );
+        assert_eq!(
+            resolver.resolve_user(USER).await,
+            Err(WorkspaceError::Unavailable)
+        );
+        assert_eq!(resolver.entity_for(USER), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_user_gatekeeper_has_no_workspace_for_must_sign_in_again() {
+        let (base, _) = spawn_service_gatekeeper(StatusCode::OK).await;
+        let resolver = service_resolver(&base);
+
+        assert_eq!(
+            resolver
+                .resolve_user("9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b")
+                .await,
+            Err(WorkspaceError::ReauthRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_wrong_service_key_is_a_failed_lookup() {
+        let (base, _) = spawn_service_gatekeeper(StatusCode::OK).await;
+        let resolver = WorkspaceResolver::new(Some(&base))
+            .with_service_lookup(&base, SecretString::new("wrong-key".into()));
+
+        assert_eq!(
+            resolver.resolve_user(USER).await,
+            Err(WorkspaceError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_service_lookup_tokenless_work_bills_only_cached_workspaces() {
+        let resolver = WorkspaceResolver::new(None);
+        assert_eq!(
+            resolver.resolve_user(USER).await,
+            Err(WorkspaceError::ReauthRequired)
+        );
+
+        resolver.remember(USER, PERSONAL);
+        assert_eq!(
+            resolver.resolve_user(USER).await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_request_uses_the_service_lookup_before_the_token() {
+        // userinfo always fails on this Gatekeeper, so only the service
+        // lookup can resolve the request
+        let (base, calls) = spawn_service_gatekeeper(StatusCode::OK).await;
+        let resolver = service_resolver(&base);
+
+        assert_eq!(
+            resolver.resolve(USER, "user-token").await,
+            Ok(BillingEntity::organization(PERSONAL))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_service_lookup_falls_back_to_the_users_token() {
+        let (userinfo_base, _) = spawn_gatekeeper(StatusCode::OK).await;
+        let (service_base, _) = spawn_service_gatekeeper(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let resolver = WorkspaceResolver::new(Some(&userinfo_base))
+            .with_service_lookup(&service_base, SecretString::new(SERVICE_KEY.into()));
+
+        assert_eq!(
+            resolver.resolve(USER, "user-token").await,
             Ok(BillingEntity::organization(PERSONAL))
         );
     }

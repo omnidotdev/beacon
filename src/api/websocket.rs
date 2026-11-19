@@ -203,10 +203,7 @@ async fn handle_socket(
     if let (Some(billing_state), Some(user_id)) = (&state.billing_state, &gatekeeper_user_id) {
         let entity = match &token {
             Some(token) => billing_state.workspaces.resolve(user_id, token).await,
-            None => billing_state
-                .workspaces
-                .entity_for(user_id)
-                .ok_or(crate::billing::WorkspaceError::ReauthRequired),
+            None => billing_state.workspaces.resolve_user(user_id).await,
         };
         let entity = match entity {
             Ok(entity) => Some(entity),
