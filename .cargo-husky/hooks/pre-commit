@@ -1,0 +1,11 @@
+#!/bin/sh
+# Installed by cargo-husky (user-hooks). Mirrors CI, test code included in the
+# lint so a test-only clippy error cannot land unseen
+set -e
+
+echo '+cargo test'
+cargo test
+echo '+cargo clippy --all-targets -- -D warnings'
+cargo clippy --all-targets -- -D warnings
+echo '+cargo fmt -- --check'
+cargo fmt -- --check

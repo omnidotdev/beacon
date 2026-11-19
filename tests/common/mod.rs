@@ -1,5 +1,8 @@
 //! Shared test utilities
 
+// Each test crate includes this module and uses only some of its helpers
+#![allow(dead_code)]
+
 use beacon_gateway::{DbPool, db};
 
 /// Set up an in-memory test database

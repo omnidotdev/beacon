@@ -114,14 +114,14 @@ name = "beacon"
 
     #[test]
     fn detects_restart_required() {
-        let old = r#"
+        let old = r"
 [server]
 port = 3000
-"#;
-        let new = r#"
+";
+        let new = r"
 [server]
 port = 4000
-"#;
+";
         let diff = classify_changes(old, new);
         assert!(diff.requires_restart);
         assert!(!diff.has_hot_changes());
@@ -144,14 +144,14 @@ port = 3000
 
     #[test]
     fn detects_tool_policy_change() {
-        let old = r#"
+        let old = r"
 [tool_policy]
 allow_all = true
-"#;
-        let new = r#"
+";
+        let new = r"
 [tool_policy]
 allow_all = false
-"#;
+";
         let diff = classify_changes(old, new);
         assert!(diff.tool_policy);
         assert!(diff.has_hot_changes());

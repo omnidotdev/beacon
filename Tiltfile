@@ -46,7 +46,7 @@ local_resource(
 # Lint
 local_resource(
     "lint-%s" % project_name,
-    cmd="cargo clippy",
+    cmd="cargo clippy --all-targets",
     deps=["src", "Cargo.toml"],
     labels=[project_name],
     auto_init=False,

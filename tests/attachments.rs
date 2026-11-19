@@ -110,7 +110,7 @@ async fn media_runs_on_the_turn_gateway_key() {
 
     assert!(text.contains("a cat"), "{text}");
     assert!(text.contains("hello there"), "{text}");
-    let seen = seen.lock().unwrap();
+    let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert!(
         seen.iter()

@@ -369,6 +369,6 @@ mod tests {
         // A single * without closing should not produce <i>
         let result = markdown_to_telegram_html("start * middle");
         assert!(!result.contains("<i>"));
-        assert!(result.contains("*"));
+        assert!(result.contains('*'));
     }
 }
