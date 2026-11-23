@@ -20,6 +20,15 @@ fn build_test_state(db: DbPool) -> Arc<beacon_gateway::api::ApiState> {
 
 /// Build test API state as a self-hosted (false) or cloud (true) gateway
 fn build_test_state_with_mode(db: DbPool, cloud_mode: bool) -> Arc<beacon_gateway::api::ApiState> {
+    build_test_state_with(db, cloud_mode, Some("test-api-key"))
+}
+
+/// Build test API state with an explicit mode and operator API key
+fn build_test_state_with(
+    db: DbPool,
+    cloud_mode: bool,
+    api_key: Option<&str>,
+) -> Arc<beacon_gateway::api::ApiState> {
     use beacon_gateway::db::{MemoryRepo, SessionRepo, SkillRepo, UserRepo};
 
     let tool_policy = Arc::new(ToolPolicy::new(&ToolPolicyConfig::default()));
@@ -36,7 +45,7 @@ fn build_test_state_with_mode(db: DbPool, cloud_mode: bool) -> Arc<beacon_gatewa
 
     Arc::new(beacon_gateway::api::ApiState {
         db,
-        api_key: Some("test-api-key".to_string()),
+        api_key: api_key.map(str::to_string),
         persona_id: "test-persona".to_string(),
         persona_name: "TestBot".to_string(),
         persona_system_prompt: None,
@@ -326,4 +335,97 @@ async fn test_activate_switches_default_when_self_hosted() {
 #[tokio::test]
 async fn test_activate_leaves_shared_default_alone_in_cloud() {
     assert_eq!(activate_microcap(true).await, "test-persona");
+}
+
+/// Admin and skills routes behind the cloud route guard, as the server wires them
+fn build_guarded_router(state: Arc<beacon_gateway::api::ApiState>) -> axum::Router {
+    axum::Router::new()
+        .nest(
+            "/api/admin",
+            beacon_gateway::api::admin::router(state.clone()),
+        )
+        .nest(
+            "/api/skills",
+            beacon_gateway::api::skills::router(state.clone()),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            beacon_gateway::api::auth::cloud_route_guard,
+        ))
+}
+
+async fn guarded_status(
+    state: Arc<beacon_gateway::api::ApiState>,
+    method: &str,
+    uri: &str,
+    bearer: Option<&str>,
+) -> StatusCode {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(token) = bearer {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    build_guarded_router(state)
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn test_cloud_guard_refuses_admin_without_key() {
+    let state = build_test_state_with(setup_test_db(), true, Some("test-api-key"));
+
+    assert_eq!(
+        guarded_status(state.clone(), "GET", "/api/admin/sessions", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        guarded_status(state.clone(), "GET", "/api/admin/sessions", Some("wrong")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        guarded_status(state, "GET", "/api/admin/sessions", Some("test-api-key")).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn test_cloud_guard_fails_closed_without_configured_key() {
+    let state = build_test_state_with(setup_test_db(), true, None);
+
+    assert_eq!(
+        guarded_status(state.clone(), "GET", "/api/admin/sessions", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        guarded_status(state, "GET", "/api/admin/sessions", Some("anything")).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn test_cloud_guard_blocks_skill_installs() {
+    let state = build_test_state_with(setup_test_db(), true, Some("test-api-key"));
+
+    for (method, uri) in [
+        ("POST", "/api/skills/install/local"),
+        ("POST", "/api/skills/some-skill/install-deps"),
+        ("GET", "/api/skills"),
+    ] {
+        assert_eq!(
+            guarded_status(state.clone(), method, uri, None).await,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_guard_leaves_self_hosted_gateways_alone() {
+    let state = build_test_state_with(setup_test_db(), false, None);
+
+    assert_eq!(
+        guarded_status(state, "GET", "/api/admin/sessions", None).await,
+        StatusCode::OK
+    );
 }
