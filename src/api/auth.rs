@@ -100,8 +100,14 @@ pub fn classify_route(method: &Method, path: &str) -> RouteAccess {
         };
     }
 
+    // Marketplace personas are installed gateway-wide, so one user must not
+    // add or remove them for everyone
     if under(path, "/api/personas/marketplace") {
-        return RouteAccess::User;
+        return if method == Method::GET {
+            RouteAccess::User
+        } else {
+            RouteAccess::Operator
+        };
     }
 
     let public = matches!(
@@ -365,6 +371,20 @@ mod tests {
             assert_eq!(
                 classify_route(&Method::GET, path),
                 RouteAccess::User,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn marketplace_personas_are_read_only_for_users() {
+        for (method, path) in [
+            (Method::POST, "/api/personas/marketplace/install"),
+            (Method::DELETE, "/api/personas/marketplace/jocko"),
+        ] {
+            assert_eq!(
+                classify_route(&method, path),
+                RouteAccess::Operator,
                 "{path}"
             );
         }
