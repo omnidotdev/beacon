@@ -61,6 +61,7 @@ pub struct ModelInfo {
 #[derive(Debug)]
 pub struct ActivePersona {
     pub id: String,
+    pub name: String,
     pub system_prompt: Option<String>,
 }
 
@@ -161,6 +162,25 @@ impl ApiState {
     /// Falls back to the static `system_prompt` when no skills are installed.
     #[must_use]
     pub fn system_prompt_with_skills(&self, user_id: Option<&str>) -> String {
+        self.system_prompt_for_persona(
+            user_id,
+            &self.persona_name,
+            self.persona_system_prompt.as_deref(),
+        )
+    }
+
+    /// Build the system prompt for a specific persona with current enabled skills
+    ///
+    /// Chat resolves the persona per message (the one the user picked), so the
+    /// identity section must come from that persona rather than the one the
+    /// gateway booted with
+    #[must_use]
+    pub fn system_prompt_for_persona(
+        &self,
+        user_id: Option<&str>,
+        persona_name: &str,
+        persona_prompt: Option<&str>,
+    ) -> String {
         let all_skills = self
             .skill_repo
             .list_enabled_for_user(user_id)
@@ -172,7 +192,10 @@ impl ApiState {
             .filter(|s| self.skill_filter.allows(&s.skill.metadata.name))
             .collect();
 
-        if skills.is_empty() {
+        // The static boot prompt only matches the boot persona
+        let is_boot_persona = persona_name == self.persona_name
+            && persona_prompt == self.persona_system_prompt.as_deref();
+        if skills.is_empty() && is_boot_persona {
             return self.system_prompt.clone();
         }
         let budget = crate::prompt::PromptBudget {
@@ -181,8 +204,8 @@ impl ApiState {
             voice_enabled: self.voice_enabled,
         };
         crate::prompt::build_system_prompt_with_budget(
-            &self.persona_name,
-            self.persona_system_prompt.as_deref().unwrap_or_default(),
+            persona_name,
+            persona_prompt.unwrap_or_default(),
             &skills,
             &budget,
         )
@@ -583,6 +606,7 @@ impl ApiServerBuilder {
 
         let active_persona = Arc::new(RwLock::new(ActivePersona {
             id: self.persona_id.clone(),
+            name: self.persona_name.clone(),
             system_prompt: self.persona_system_prompt.clone(),
         }));
 

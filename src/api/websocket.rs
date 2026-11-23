@@ -447,14 +447,15 @@ async fn handle_chat_message(
     );
 
     // Resolve persona: prefer per-message override, fall back to active persona
-    let (active_persona_id, active_system_prompt) = if let Some(ref override_id) =
-        persona_id_override
+    let (active_persona_id, active_persona_name, active_system_prompt) = if let Some(
+        ref override_id,
+    ) = persona_id_override
     {
         // No-persona mode: skip system prompt entirely
         if override_id == crate::NO_PERSONA_ID {
-            (override_id.clone(), None)
+            (override_id.clone(), String::new(), None)
         // Load the requested persona from cache or embedded defaults
-        } else if let Some((_info, system_prompt)) =
+        } else if let Some((info, system_prompt)) =
             super::health::load_full_persona(&state.persona_cache_dir, override_id).or_else(|| {
                 crate::Config::load_embedded_persona(override_id)
                     .ok()
@@ -464,21 +465,23 @@ async fn handle_chat_message(
                     })
             })
         {
-            (override_id.clone(), system_prompt)
+            (override_id.clone(), info.name, system_prompt)
         } else {
             tracing::warn!(persona_id = %override_id, "requested persona not found, using active");
             let active = state.active_persona.read().await;
-            let id = active.id.clone();
-            let prompt = active.system_prompt.clone();
-            drop(active);
-            (id, prompt)
+            (
+                active.id.clone(),
+                active.name.clone(),
+                active.system_prompt.clone(),
+            )
         }
     } else {
         let active = state.active_persona.read().await;
-        let id = active.id.clone();
-        let prompt = active.system_prompt.clone();
-        drop(active);
-        (id, prompt)
+        (
+            active.id.clone(),
+            active.name.clone(),
+            active.system_prompt.clone(),
+        )
     };
 
     // Ensure session exists (creates if not found)
@@ -497,7 +500,7 @@ async fn handle_chat_message(
 
     // Build context config with active persona
     let context_config =
-        crate::api::ApiServer::context_config(&active_persona_id, active_system_prompt);
+        crate::api::ApiServer::context_config(&active_persona_id, active_system_prompt.clone());
     let context_builder = ContextBuilder::new(context_config);
 
     // Resolve Synapse client for this user (BYOK or product-scoped managed key)
@@ -711,7 +714,14 @@ async fn handle_chat_message(
     let mut system_prompt = if active_persona_id == crate::NO_PERSONA_ID {
         String::new()
     } else {
-        state.system_prompt_with_skills(gatekeeper_user_id)
+        // Identity comes from the persona resolved for this message, not the
+        // gateway's boot persona, so picking a persona actually changes who
+        // replies
+        state.system_prompt_for_persona(
+            gatekeeper_user_id,
+            &active_persona_name,
+            active_system_prompt.as_deref(),
+        )
     };
 
     // Append invoked slash skill to system prompt

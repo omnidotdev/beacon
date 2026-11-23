@@ -13,9 +13,8 @@ use tower::ServiceExt;
 mod common;
 use common::{create_test_session, create_test_user, setup_test_db};
 
-/// Build a test API router
-fn build_test_router(db: DbPool) -> axum::Router {
-    use axum::Router;
+/// Build test API state
+fn build_test_state(db: DbPool) -> Arc<beacon_gateway::api::ApiState> {
     use beacon_gateway::db::{MemoryRepo, SessionRepo, SkillRepo, UserRepo};
 
     let tool_policy = Arc::new(ToolPolicy::new(&ToolPolicyConfig::default()));
@@ -30,7 +29,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
     let telegram_group_repo = beacon_gateway::db::TelegramGroupConfigRepo::new(db.clone());
     let db_for_harness = db.clone();
 
-    let state = Arc::new(beacon_gateway::api::ApiState {
+    Arc::new(beacon_gateway::api::ApiState {
         db,
         api_key: Some("test-api-key".to_string()),
         persona_id: "test-persona".to_string(),
@@ -40,7 +39,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
         synapse: None,
         llm_model: "test-model".to_string(),
         llm_max_tokens: 1024,
-        system_prompt: String::new(),
+        system_prompt: "You are TestBot. Keep responses concise and conversational.".to_string(),
         telegram: None,
         teams: None,
         session_repo,
@@ -75,6 +74,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
         skills_config: beacon_gateway::config::SkillsConfig::default(),
         active_persona: Arc::new(RwLock::new(beacon_gateway::api::ActivePersona {
             id: "test-persona".to_string(),
+            name: "TestBot".to_string(),
             system_prompt: None,
         })),
         hook_manager: None,
@@ -95,7 +95,14 @@ fn build_test_router(db: DbPool) -> axum::Router {
         usage_repo: None,
         adapter_registry: Arc::new(beacon_gateway::agent::AdapterRegistry::new()),
         harness_session_repo: beacon_gateway::agent::HarnessSessionRepo::new(db_for_harness),
-    });
+    })
+}
+
+/// Build a test API router
+fn build_test_router(db: DbPool) -> axum::Router {
+    use axum::Router;
+
+    let state = build_test_state(db);
 
     Router::new()
         .nest(
@@ -261,4 +268,27 @@ async fn test_admin_session_messages() {
     assert!(json.is_array());
     assert_eq!(json.as_array().unwrap().len(), 1);
     assert_eq!(json[0]["content"], "Hello");
+}
+
+#[test]
+fn test_system_prompt_uses_selected_persona() {
+    let state = build_test_state(setup_test_db());
+
+    let prompt = state.system_prompt_for_persona(
+        None,
+        "Microcap",
+        Some("You are Microcap, a swaggering pink diamond."),
+    );
+
+    assert!(prompt.contains("Microcap"), "prompt: {prompt}");
+    assert!(!prompt.contains("TestBot"), "prompt: {prompt}");
+}
+
+#[test]
+fn test_system_prompt_defaults_to_boot_persona() {
+    let state = build_test_state(setup_test_db());
+
+    let prompt = state.system_prompt_with_skills(None);
+
+    assert!(prompt.contains("TestBot"), "prompt: {prompt}");
 }

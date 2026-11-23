@@ -240,6 +240,7 @@ async fn activate_persona(
             {
                 let mut active = state.active_persona.write().await;
                 active.id.clone_from(&persona_id);
+                active.name.clone_from(&info.name);
                 active.system_prompt = system_prompt;
             }
             tracing::info!(persona_id = %persona_id, "persona activated");
