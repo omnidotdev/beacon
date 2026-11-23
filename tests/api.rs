@@ -15,6 +15,11 @@ use common::{create_test_session, create_test_user, setup_test_db};
 
 /// Build test API state
 fn build_test_state(db: DbPool) -> Arc<beacon_gateway::api::ApiState> {
+    build_test_state_with_mode(db, false)
+}
+
+/// Build test API state as a self-hosted (false) or cloud (true) gateway
+fn build_test_state_with_mode(db: DbPool, cloud_mode: bool) -> Arc<beacon_gateway::api::ApiState> {
     use beacon_gateway::db::{MemoryRepo, SessionRepo, SkillRepo, UserRepo};
 
     let tool_policy = Arc::new(ToolPolicy::new(&ToolPolicyConfig::default()));
@@ -65,7 +70,7 @@ fn build_test_state(db: DbPool) -> Arc<beacon_gateway::api::ApiState> {
         persona_knowledge: vec![],
         max_context_tokens: 8000,
         knowledge_cache_dir: std::path::PathBuf::from("/tmp/test-knowledge-cache"),
-        cloud_mode: false,
+        cloud_mode,
         rate_limiter: None,
         ws_senders: None,
         billing_state: None,
@@ -291,4 +296,34 @@ fn test_system_prompt_defaults_to_boot_persona() {
     let prompt = state.system_prompt_with_skills(None);
 
     assert!(prompt.contains("TestBot"), "prompt: {prompt}");
+}
+
+/// Activate the embedded Microcap persona and return the gateway's fallback persona id
+async fn activate_microcap(cloud_mode: bool) -> String {
+    let state = build_test_state_with_mode(setup_test_db(), cloud_mode);
+    let app = beacon_gateway::api::health::ready_router(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/personas/microcap/activate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    state.active_persona.read().await.id.clone()
+}
+
+#[tokio::test]
+async fn test_activate_switches_default_when_self_hosted() {
+    assert_eq!(activate_microcap(false).await, "microcap");
+}
+
+#[tokio::test]
+async fn test_activate_leaves_shared_default_alone_in_cloud() {
+    assert_eq!(activate_microcap(true).await, "test-persona");
 }
