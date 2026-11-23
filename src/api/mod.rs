@@ -4,7 +4,7 @@ pub mod admin;
 pub mod billing;
 pub mod feedback;
 pub use feedback::{FeedbackAnswer, FeedbackManager};
-mod auth;
+pub mod auth;
 pub mod browser;
 pub mod canvas;
 pub mod health;
@@ -781,6 +781,13 @@ impl ApiServer {
             router = router.fallback_service(serve_dir);
             tracing::info!(path = %static_dir.display(), "serving static files");
         }
+
+        // Cloud route guard: fail closed on every route a multi-user gateway
+        // must not expose (no-op when self-hosted)
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            auth::cloud_route_guard,
+        ));
 
         // Billing: entitlement enforcement (cloud mode only, when Aether is configured)
         let router = if let (Some(billing_state), Some(jwt_cache)) = (
