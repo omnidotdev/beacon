@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use beacon_gateway::db::{self, UserRepo};
+use beacon_gateway::db::UserRepo;
 use beacon_gateway::voice::{AudioCapture, AudioPlayback};
 use beacon_gateway::{Config, Daemon};
 
@@ -192,17 +192,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Command::TestMic { duration } => test_mic(duration).await,
             Command::TestSpeaker => test_speaker(),
             Command::TestTts { text } => Box::pin(test_tts(persona_ref, &text)).await,
-            Command::SetLifeJson { user, path } => set_life_json(persona_ref, &user, &path),
-            Command::GetLifeJson { user } => get_life_json(persona_ref, &user),
+            Command::SetLifeJson { user, path } => set_life_json(persona_ref, &user, &path).await,
+            Command::GetLifeJson { user } => get_life_json(persona_ref, &user).await,
             Command::Install => cmd_install(persona_ref, cli.port),
             Command::Uninstall => cmd_uninstall(),
             Command::Status => cmd_status(),
             Command::Logs { lines, follow } => cmd_logs(lines, follow),
             Command::Setup => beacon_gateway::setup::run_setup(),
             Command::Doctor => cmd_doctor(persona_ref).await,
-            Command::Sessions { command } => cmd_sessions(persona_ref, &command),
+            Command::Sessions { command } => cmd_sessions(persona_ref, &command).await,
             Command::ConfigCmd { command } => cmd_config(command),
-            Command::Backup { command } => cmd_backup(persona_ref, command),
+            Command::Backup { command } => cmd_backup(persona_ref, command).await,
         };
     }
 
@@ -221,7 +221,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let wake_word = config.persona.wake_word().map(ToString::to_string);
 
     // Create and run daemon
-    let daemon = Daemon::new(config, cli.port)?;
+    let daemon = Daemon::new(config, cli.port).await?;
 
     if voice_enabled {
         if let Some(ww) = &wake_word {
@@ -394,14 +394,13 @@ async fn test_tts(persona: Option<&str>, text: &str) -> anyhow::Result<()> {
 }
 
 /// Set a user's life.json path
-fn set_life_json(persona: Option<&str>, user_id: &str, path: &str) -> anyhow::Result<()> {
+async fn set_life_json(persona: Option<&str>, user_id: &str, path: &str) -> anyhow::Result<()> {
     let config = Config::load(persona)?;
-    let db_path = config.data_dir.join("beacon.db");
-    let pool = db::init(&db_path)?;
+    let pool = config.open_database().await?;
     let user_repo = UserRepo::new(pool);
 
     // Ensure user exists
-    let user = user_repo.find_or_create(user_id)?;
+    let user = user_repo.find_or_create(user_id).await?;
 
     // Set the path
     let path_to_set = if path.is_empty() || path == "none" {
@@ -410,7 +409,7 @@ fn set_life_json(persona: Option<&str>, user_id: &str, path: &str) -> anyhow::Re
         Some(path)
     };
 
-    user_repo.set_life_json_path(&user.id, path_to_set)?;
+    user_repo.set_life_json_path(&user.id, path_to_set).await?;
 
     match path_to_set {
         Some(p) => println!("Set life.json path for user {user_id}: {p}"),
@@ -421,13 +420,12 @@ fn set_life_json(persona: Option<&str>, user_id: &str, path: &str) -> anyhow::Re
 }
 
 /// Get a user's life.json path
-fn get_life_json(persona: Option<&str>, user_id: &str) -> anyhow::Result<()> {
+async fn get_life_json(persona: Option<&str>, user_id: &str) -> anyhow::Result<()> {
     let config = Config::load(persona)?;
-    let db_path = config.data_dir.join("beacon.db");
-    let pool = db::init(&db_path)?;
+    let pool = config.open_database().await?;
     let user_repo = UserRepo::new(pool);
 
-    match user_repo.find_or_create(user_id) {
+    match user_repo.find_or_create(user_id).await {
         Ok(user) => match user.life_json_path {
             Some(path) => println!("User {user_id} life.json: {path}"),
             None => println!("User {user_id} has no life.json configured"),
@@ -499,22 +497,21 @@ async fn cmd_doctor(persona: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Session management commands
-fn cmd_sessions(persona: Option<&str>, command: &SessionsCommand) -> anyhow::Result<()> {
+async fn cmd_sessions(persona: Option<&str>, command: &SessionsCommand) -> anyhow::Result<()> {
     let config = Config::load(persona)?;
-    let db_path = config.data_dir.join("beacon.db");
-    let pool = db::init(&db_path)?;
+    let pool = config.open_database().await?;
     let session_repo = beacon_gateway::db::SessionRepo::new(pool);
 
     match command {
         SessionsCommand::List => {
-            let sessions = session_repo.list_all()?;
-            let count = session_repo.count()?;
-            let disk = session_repo.disk_usage()?;
+            let sessions = session_repo.list_all().await?;
+            let count = session_repo.count().await?;
+            let disk = session_repo.disk_usage().await?;
 
             println!("{count} sessions ({} content bytes)\n", format_bytes(disk));
 
             for session in &sessions {
-                let msg_count = session_repo.message_count(&session.id).unwrap_or(0);
+                let msg_count = session_repo.message_count(&session.id).await.unwrap_or(0);
                 println!(
                     "  {} | {} | {} | {} msgs | {}",
                     &session.id[..8],
@@ -527,7 +524,9 @@ fn cmd_sessions(persona: Option<&str>, command: &SessionsCommand) -> anyhow::Res
         }
         SessionsCommand::Cleanup { older_than_days } => {
             #[allow(clippy::cast_possible_wrap)]
-            let deleted = session_repo.prune_older_than(*older_than_days as i64)?;
+            let deleted = session_repo
+                .prune_older_than(*older_than_days as i64)
+                .await?;
             println!("deleted {deleted} sessions older than {older_than_days} days");
         }
     }
@@ -557,12 +556,12 @@ fn cmd_config(command: ConfigCommand) -> anyhow::Result<()> {
 }
 
 /// Backup management commands
-fn cmd_backup(persona: Option<&str>, command: BackupCommand) -> anyhow::Result<()> {
+async fn cmd_backup(persona: Option<&str>, command: BackupCommand) -> anyhow::Result<()> {
     let config = Config::load(persona)?;
 
     match command {
         BackupCommand::Create { output } => {
-            beacon_gateway::backup::create_backup(&config.data_dir, output.as_deref())?;
+            beacon_gateway::backup::create_backup(&config.data_dir, output.as_deref()).await?;
             Ok(())
         }
         BackupCommand::Verify { path } => {

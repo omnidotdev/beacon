@@ -1,28 +1,30 @@
 //! Knowledge pack repository for installed knowledge persistence
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
 use uuid::Uuid;
 
-use super::DbPool;
+use super::{Backend, DbPool};
+use crate::Result;
 use crate::persona::KnowledgePack;
-use crate::{Error, Result};
 
 /// Column list for all knowledge pack SELECT queries
 const PACK_COLUMNS: &str = "id, name, version, source_namespace, description, tags, chunk_count, has_embeddings, content, installed_at, updated_at";
 
 /// Map a database row to a `KnowledgePackRow`
-fn row_to_pack_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgePackRow> {
+fn row_to_pack_row(row: &AnyRow) -> Result<KnowledgePackRow> {
     Ok(KnowledgePackRow {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        version: row.get(2)?,
-        source_namespace: row.get(3)?,
-        description: row.get(4)?,
-        tags: row.get(5)?,
-        chunk_count: row.get(6)?,
-        has_embeddings: row.get::<_, i32>(7)? != 0,
-        content: row.get(8)?,
-        installed_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        version: row.try_get(2)?,
+        source_namespace: row.try_get(3)?,
+        description: row.try_get(4)?,
+        tags: row.try_get(5)?,
+        chunk_count: row.try_get(6)?,
+        has_embeddings: row.try_get::<i64, _>(7)? != 0,
+        content: row.try_get(8)?,
+        installed_at: row.try_get(9)?,
+        updated_at: row.try_get(10)?,
     })
 }
 
@@ -61,17 +63,12 @@ impl KnowledgePackRepo {
     ///
     /// Serializes the pack to JSON and stores it alongside metadata.
     /// If the pack includes pre-computed embeddings, they are inserted
-    /// into the `knowledge_vec` virtual table.
+    /// into the `knowledge_vec` table in the same transaction.
     ///
     /// # Errors
     ///
     /// Returns error if database operation or serialization fails
-    pub fn install(&self, pack: &KnowledgePack, namespace: &str) -> Result<String> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn install(&self, pack: &KnowledgePack, namespace: &str) -> Result<String> {
         let id = format!("kp_{}", Uuid::new_v4());
         let tags_json = serde_json::to_string(&pack.tags)?;
         let content_json = serde_json::to_string(pack)?;
@@ -79,36 +76,47 @@ impl KnowledgePackRepo {
         #[allow(clippy::cast_possible_wrap)]
         let chunk_count = pack.chunks.len() as i64;
         let has_embeddings = pack.embeddings.is_some();
+        let now = super::now();
 
-        conn.execute(
-            &format!(
-                "INSERT INTO installed_knowledge_packs ({PACK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now'))"
-            ),
-            rusqlite::params![
-                id,
-                pack.name,
-                pack.version,
-                namespace,
-                pack.description,
-                tags_json,
-                chunk_count,
-                i32::from(has_embeddings),
-                content_json,
-            ],
-        )?;
+        let mut tx = self.pool.pool().begin().await?;
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO installed_knowledge_packs ({PACK_COLUMNS})
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)"
+        )))
+        .bind(id.clone())
+        .bind(pack.name.clone())
+        .bind(pack.version.clone())
+        .bind(namespace.to_string())
+        .bind(pack.description.clone())
+        .bind(tags_json)
+        .bind(chunk_count)
+        .bind(i64::from(has_embeddings))
+        .bind(content_json)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
 
         // Insert embeddings into knowledge_vec if present
         if let Some(ref embeddings) = pack.embeddings {
+            let insert = match self.pool.backend() {
+                Backend::Sqlite => {
+                    "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES ($1, $2)"
+                }
+                Backend::Postgres => {
+                    "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES ($1, $2::vector)"
+                }
+            };
             for (chunk_idx, embedding) in &embeddings.vectors {
-                let chunk_id = format!("{id}:{chunk_idx}");
-                let embedding_bytes = super::embedder::Embedder::to_bytes(embedding);
-
-                conn.execute(
-                    "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES (?1, ?2)",
-                    rusqlite::params![chunk_id, embedding_bytes],
-                )?;
+                let query = sqlx::query(insert).bind(format!("{id}:{chunk_idx}"));
+                super::encode_embedding(self.pool.backend(), embedding)
+                    .bind(query)
+                    .execute(&mut *tx)
+                    .await?;
             }
         }
+
+        tx.commit().await?;
 
         tracing::info!(
             pack_id = %id,
@@ -129,37 +137,36 @@ impl KnowledgePackRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn uninstall(&self, name: &str, namespace: &str) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn uninstall(&self, name: &str, namespace: &str) -> Result<bool> {
+        let mut tx = self.pool.pool().begin().await?;
 
         // Look up the pack ID before deletion (needed for vector cleanup)
-        let pack_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM installed_knowledge_packs WHERE name = ?1 AND source_namespace = ?2",
-                rusqlite::params![name, namespace],
-                |row| row.get(0),
-            )
-            .ok();
+        let pack_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM installed_knowledge_packs WHERE name = $1 AND source_namespace = $2",
+        )
+        .bind(name.to_string())
+        .bind(namespace.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
 
         let Some(pack_id) = pack_id else {
             return Ok(false);
         };
 
         // Clean up vector entries (chunk_id starts with pack_id)
-        let prefix = format!("{pack_id}:%");
-        conn.execute(
-            "DELETE FROM knowledge_vec WHERE chunk_id LIKE ?1",
-            rusqlite::params![prefix],
-        )?;
+        sqlx::query("DELETE FROM knowledge_vec WHERE chunk_id LIKE $1")
+            .bind(format!("{pack_id}:%"))
+            .execute(&mut *tx)
+            .await?;
 
         // Delete the pack row
-        let deleted = conn.execute(
-            "DELETE FROM installed_knowledge_packs WHERE id = ?1",
-            rusqlite::params![pack_id],
-        )?;
+        let deleted = sqlx::query("DELETE FROM installed_knowledge_packs WHERE id = $1")
+            .bind(pack_id.clone())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        tx.commit().await?;
 
         if deleted > 0 {
             tracing::info!(
@@ -178,23 +185,16 @@ impl KnowledgePackRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get(&self, id: &str) -> Result<Option<KnowledgePackRow>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let result = conn.query_row(
-            &format!("SELECT {PACK_COLUMNS} FROM installed_knowledge_packs WHERE id = ?1"),
-            rusqlite::params![id],
-            row_to_pack_row,
-        );
-
-        match result {
-            Ok(row) => Ok(Some(row)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    pub async fn get(&self, id: &str) -> Result<Option<KnowledgePackRow>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {PACK_COLUMNS} FROM installed_knowledge_packs WHERE id = $1"
+        )))
+        .bind(id.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?
+        .as_ref()
+        .map(row_to_pack_row)
+        .transpose()
     }
 
     /// Get a knowledge pack by name and namespace
@@ -202,23 +202,21 @@ impl KnowledgePackRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_by_name(&self, name: &str, namespace: &str) -> Result<Option<KnowledgePackRow>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let result = conn.query_row(
-            &format!("SELECT {PACK_COLUMNS} FROM installed_knowledge_packs WHERE name = ?1 AND source_namespace = ?2"),
-            rusqlite::params![name, namespace],
-            row_to_pack_row,
-        );
-
-        match result {
-            Ok(row) => Ok(Some(row)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    pub async fn get_by_name(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<KnowledgePackRow>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {PACK_COLUMNS} FROM installed_knowledge_packs WHERE name = $1 AND source_namespace = $2"
+        )))
+        .bind(name.to_string())
+        .bind(namespace.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?
+        .as_ref()
+        .map(row_to_pack_row)
+        .transpose()
     }
 
     /// List all installed knowledge packs
@@ -226,63 +224,56 @@ impl KnowledgePackRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list(&self) -> Result<Vec<KnowledgePackRow>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let mut stmt = conn.prepare(&format!(
+    pub async fn list(&self) -> Result<Vec<KnowledgePackRow>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {PACK_COLUMNS} FROM installed_knowledge_packs ORDER BY name"
-        ))?;
-
-        let rows = stmt.query_map([], row_to_pack_row)?;
-
-        let mut packs = Vec::new();
-        for row in rows {
-            packs.push(row?);
-        }
-
-        Ok(packs)
+        )))
+        .fetch_all(self.pool.pool())
+        .await?
+        .iter()
+        .map(row_to_pack_row)
+        .collect()
     }
 
     /// Search knowledge chunk embeddings by vector similarity
     ///
-    /// Returns `(chunk_id, distance)` pairs ordered by distance (closest first).
+    /// Returns `(chunk_id, distance)` pairs ordered by L2 distance (closest first).
     ///
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn search_chunks(
+    pub async fn search_chunks(
         &self,
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-        let embedding_bytes = super::embedder::Embedder::to_bytes(query_embedding);
-
-        let mut stmt = conn.prepare(
-            r"SELECT chunk_id, distance
-              FROM knowledge_vec
-              WHERE embedding MATCH ?1
-              ORDER BY distance
-              LIMIT ?2",
-        )?;
+        let sql = match self.pool.backend() {
+            Backend::Sqlite => {
+                r"SELECT chunk_id, distance
+                  FROM knowledge_vec
+                  WHERE embedding MATCH $1
+                  ORDER BY distance
+                  LIMIT $2"
+            }
+            Backend::Postgres => {
+                r"SELECT chunk_id, CAST(embedding <-> $1::vector AS DOUBLE PRECISION) AS distance
+                  FROM knowledge_vec
+                  ORDER BY embedding <-> $1::vector
+                  LIMIT $2"
+            }
+        };
 
         #[allow(clippy::cast_possible_wrap)]
-        let rows = stmt.query_map(rusqlite::params![embedding_bytes, limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = super::encode_embedding(self.pool.backend(), query_embedding)
+            .bind(sqlx::query(sql))
+            .bind(limit as i64)
+            .fetch_all(self.pool.pool())
+            .await?;
 
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-
-        Ok(results)
+        #[allow(clippy::cast_possible_truncation)]
+        rows.iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get::<f64, _>(1)? as f32)))
+            .collect()
     }
 }
 
@@ -321,16 +312,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_install_and_get() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_install_and_get() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        let id = repo.install(&pack, "omni").unwrap();
+        let id = repo.install(&pack, "omni").await.unwrap();
         assert!(id.starts_with("kp_"));
 
-        let fetched = repo.get(&id).unwrap().unwrap();
+        let fetched = repo.get(&id).await.unwrap().unwrap();
         assert_eq!(fetched.name, "test-knowledge");
         assert_eq!(fetched.version, "1.0.0");
         assert_eq!(fetched.source_namespace, "omni");
@@ -338,80 +329,84 @@ mod tests {
         assert!(!fetched.has_embeddings);
     }
 
-    #[test]
-    fn test_get_by_name() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_get_by_name() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        repo.install(&pack, "omni").unwrap();
+        repo.install(&pack, "omni").await.unwrap();
 
-        let fetched = repo.get_by_name("test-knowledge", "omni").unwrap().unwrap();
+        let fetched = repo
+            .get_by_name("test-knowledge", "omni")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(fetched.name, "test-knowledge");
 
         // Different namespace should not match
-        let not_found = repo.get_by_name("test-knowledge", "other").unwrap();
+        let not_found = repo.get_by_name("test-knowledge", "other").await.unwrap();
         assert!(not_found.is_none());
     }
 
-    #[test]
-    fn test_list() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_list() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        repo.install(&pack, "omni").unwrap();
+        repo.install(&pack, "omni").await.unwrap();
 
-        let packs = repo.list().unwrap();
+        let packs = repo.list().await.unwrap();
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].name, "test-knowledge");
     }
 
-    #[test]
-    fn test_uninstall() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_uninstall() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        let id = repo.install(&pack, "omni").unwrap();
+        let id = repo.install(&pack, "omni").await.unwrap();
 
         // Verify it exists
-        assert!(repo.get(&id).unwrap().is_some());
+        assert!(repo.get(&id).await.unwrap().is_some());
 
         // Uninstall
-        let removed = repo.uninstall("test-knowledge", "omni").unwrap();
+        let removed = repo.uninstall("test-knowledge", "omni").await.unwrap();
         assert!(removed);
 
         // Verify it's gone
-        assert!(repo.get(&id).unwrap().is_none());
+        assert!(repo.get(&id).await.unwrap().is_none());
 
         // Uninstalling again should return false
-        let removed_again = repo.uninstall("test-knowledge", "omni").unwrap();
+        let removed_again = repo.uninstall("test-knowledge", "omni").await.unwrap();
         assert!(!removed_again);
     }
 
-    #[test]
-    fn test_unique_constraint() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_unique_constraint() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        repo.install(&pack, "omni").unwrap();
+        repo.install(&pack, "omni").await.unwrap();
 
         // Installing the same name+namespace again should fail
         let result = repo.install(&pack, "omni");
-        assert!(result.is_err());
+        assert!(result.await.is_err());
     }
 
-    #[test]
-    fn test_content_roundtrip() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_content_roundtrip() {
+        let pool = init_memory().await.unwrap();
         let repo = KnowledgePackRepo::new(pool);
 
         let pack = test_pack();
-        let id = repo.install(&pack, "omni").unwrap();
+        let id = repo.install(&pack, "omni").await.unwrap();
 
-        let fetched = repo.get(&id).unwrap().unwrap();
+        let fetched = repo.get(&id).await.unwrap().unwrap();
         let deserialized: KnowledgePack = serde_json::from_str(&fetched.content).unwrap();
         assert_eq!(deserialized.name, "test-knowledge");
         assert_eq!(deserialized.chunks.len(), 2);

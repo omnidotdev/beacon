@@ -369,15 +369,17 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
     // Record usage locally for the operator's own usage log. This estimate is
     // never billed: managed spend is metered and charged by the Synapse gateway
     if let Some(ref usage_repo) = state.usage_repo
-        && let Err(e) = usage_repo.record(
-            &config.session_id,
-            "default",
-            &config.model,
-            &provider,
-            total_input_tokens,
-            total_output_tokens,
-            estimated_cost,
-        )
+        && let Err(e) = usage_repo
+            .record(
+                &config.session_id,
+                "default",
+                &config.model,
+                &provider,
+                total_input_tokens,
+                total_output_tokens,
+                estimated_cost,
+            )
+            .await
     {
         tracing::warn!(error = %e, "failed to record local usage");
     }
@@ -385,10 +387,12 @@ pub async fn run_agent_turn(state: &ApiState, config: AgentRunConfig) -> crate::
     // Store user message and assistant response
     state
         .session_repo
-        .add_message(&config.session_id, MessageRole::User, &config.prompt)?;
+        .add_message(&config.session_id, MessageRole::User, &config.prompt)
+        .await?;
     state
         .session_repo
-        .add_message(&config.session_id, MessageRole::Assistant, &full_response)?;
+        .add_message(&config.session_id, MessageRole::Assistant, &full_response)
+        .await?;
 
     Ok(full_response)
 }

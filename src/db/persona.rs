@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
+
 use super::DbPool;
 use crate::{Error, Persona, Result};
 
@@ -33,12 +36,7 @@ impl PersonaRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn install(&self, persona: &Persona, namespace: &str) -> Result<InstalledPersona> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn install(&self, persona: &Persona, namespace: &str) -> Result<InstalledPersona> {
         let id = Uuid::new_v4().to_string();
         let content = serde_json::to_string(persona).map_err(|e| Error::Database(e.to_string()))?;
 
@@ -54,30 +52,31 @@ impl PersonaRepo {
             .and_then(|b| b.colors.as_ref())
             .and_then(|c| c.primary.clone());
 
-        conn.execute(
+        sqlx::query(
             r"
             INSERT INTO installed_personas (
                 id, persona_id, name, tagline, avatar, accent_color, content, source_namespace
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(persona_id) DO UPDATE SET
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (persona_id) DO UPDATE SET
                 name = excluded.name,
                 tagline = excluded.tagline,
                 avatar = excluded.avatar,
                 accent_color = excluded.accent_color,
                 content = excluded.content,
-                updated_at = datetime('now')
+                updated_at = $9
             ",
-            rusqlite::params![
-                id,
-                persona.identity.id,
-                persona.identity.name,
-                persona.identity.tagline,
-                avatar,
-                accent_color,
-                content,
-                namespace,
-            ],
-        )?;
+        )
+        .bind(id.clone())
+        .bind(persona.identity.id.clone())
+        .bind(persona.identity.name.clone())
+        .bind(persona.identity.tagline.clone())
+        .bind(avatar)
+        .bind(accent_color)
+        .bind(content)
+        .bind(namespace.to_string())
+        .bind(super::now())
+        .execute(self.pool.pool())
+        .await?;
 
         tracing::info!(persona_id = %persona.identity.id, name = %persona.identity.name, "persona installed");
 
@@ -94,16 +93,12 @@ impl PersonaRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn uninstall(&self, persona_id: &str) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let rows = conn.execute(
-            "DELETE FROM installed_personas WHERE persona_id = ?1",
-            rusqlite::params![persona_id],
-        )?;
+    pub async fn uninstall(&self, persona_id: &str) -> Result<bool> {
+        let rows = sqlx::query("DELETE FROM installed_personas WHERE persona_id = $1")
+            .bind(persona_id.to_string())
+            .execute(self.pool.pool())
+            .await?
+            .rows_affected();
 
         if rows > 0 {
             tracing::info!(persona_id = %persona_id, "persona uninstalled");
@@ -117,29 +112,20 @@ impl PersonaRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get(&self, persona_id: &str) -> Result<Option<InstalledPersona>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let mut stmt = conn.prepare(
+    pub async fn get(&self, persona_id: &str) -> Result<Option<InstalledPersona>> {
+        sqlx::query(
             r"
             SELECT id, persona_id, content, source_namespace, installed_at
             FROM installed_personas
-            WHERE persona_id = ?1
+            WHERE persona_id = $1
             ",
-        )?;
-
-        let result = stmt.query_row(rusqlite::params![persona_id], |row| {
-            Self::row_to_installed_persona(row)
-        });
-
-        match result {
-            Ok(persona) => Ok(Some(persona)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+        )
+        .bind(persona_id.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?
+        .as_ref()
+        .map(Self::row_to_installed_persona)
+        .transpose()
     }
 
     /// List all installed personas
@@ -147,41 +133,30 @@ impl PersonaRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list(&self) -> Result<Vec<InstalledPersona>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let mut stmt = conn.prepare(
+    pub async fn list(&self) -> Result<Vec<InstalledPersona>> {
+        sqlx::query(
             r"
             SELECT id, persona_id, content, source_namespace, installed_at
             FROM installed_personas
             ORDER BY name
             ",
-        )?;
-
-        let rows = stmt.query_map([], Self::row_to_installed_persona)?;
-
-        let mut personas = Vec::new();
-        for row in rows {
-            personas.push(row?);
-        }
-
-        Ok(personas)
+        )
+        .fetch_all(self.pool.pool())
+        .await?
+        .iter()
+        .map(Self::row_to_installed_persona)
+        .collect()
     }
 
     /// Convert a database row to an `InstalledPersona`
-    fn row_to_installed_persona(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledPersona> {
-        let id: String = row.get(0)?;
-        let _persona_id: String = row.get(1)?;
-        let content: String = row.get(2)?;
-        let source_namespace: String = row.get(3)?;
-        let installed_at: String = row.get(4)?;
+    fn row_to_installed_persona(row: &AnyRow) -> Result<InstalledPersona> {
+        let id: String = row.try_get(0)?;
+        let content: String = row.try_get(2)?;
+        let source_namespace: String = row.try_get(3)?;
+        let installed_at: String = row.try_get(4)?;
 
-        let persona: Persona = serde_json::from_str(&content).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
-        })?;
+        let persona: Persona =
+            serde_json::from_str(&content).map_err(|e| Error::Database(e.to_string()))?;
 
         let installed_at = DateTime::parse_from_rfc3339(&format!("{installed_at}Z"))
             .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));

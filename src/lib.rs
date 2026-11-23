@@ -69,7 +69,7 @@ pub use canvas::{Canvas, CanvasCommand, CanvasContent, CanvasElement, CanvasTool
 pub use config::Config;
 pub use context::{ContextBuilder, LifeJson, LifeJsonReader};
 pub use daemon::Daemon;
-pub use db::{DbConn, DbPool};
+pub use db::DbPool;
 pub use discovery::MdnsAdvertiser;
 pub use error::{Error, Result};
 pub use extensions::{Extension, ExtensionInfo, ExtensionRegistry};

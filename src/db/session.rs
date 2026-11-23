@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
+
 use super::DbPool;
 use crate::{Error, Result};
 
@@ -68,6 +71,44 @@ impl MessageRole {
     }
 }
 
+const SESSION_COLUMNS: &str =
+    "id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at";
+const MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at, thread_id";
+
+impl Session {
+    fn from_row(row: &AnyRow) -> Result<Self> {
+        Ok(Self {
+            id: row.try_get(0)?,
+            user_id: row.try_get(1)?,
+            channel: row.try_get(2)?,
+            channel_id: row.try_get(3)?,
+            persona_id: row.try_get(4)?,
+            agent_id: row.try_get(5)?,
+            created_at: parse_datetime(&row.try_get::<String, _>(6)?),
+            updated_at: parse_datetime(&row.try_get::<String, _>(7)?),
+        })
+    }
+}
+
+impl Message {
+    fn from_row(row: &AnyRow) -> Result<Self> {
+        Ok(Self {
+            id: row.try_get(0)?,
+            session_id: row.try_get(1)?,
+            role: MessageRole::from_str(&row.try_get::<String, _>(2)?).unwrap_or(MessageRole::User),
+            content: row.try_get(3)?,
+            created_at: parse_datetime(&row.try_get::<String, _>(4)?),
+            thread_id: row.try_get(5)?,
+        })
+    }
+}
+
+/// Limit as a 64-bit bind (`LIMIT` takes an integer on every backend)
+#[allow(clippy::cast_possible_wrap)]
+const fn limit_param(limit: usize) -> i64 {
+    limit as i64
+}
+
 /// Session repository
 #[derive(Clone)]
 pub struct SessionRepo {
@@ -87,7 +128,7 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn find_or_create(
+    pub async fn find_or_create(
         &self,
         user_id: &str,
         channel: &str,
@@ -95,6 +136,7 @@ impl SessionRepo {
         persona_id: &str,
     ) -> Result<Session> {
         self.find_or_create_with_agent(user_id, channel, channel_id, persona_id, "default")
+            .await
     }
 
     /// Find or create a session for a channel conversation with agent routing
@@ -102,7 +144,7 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn find_or_create_with_agent(
+    pub async fn find_or_create_with_agent(
         &self,
         user_id: &str,
         channel: &str,
@@ -110,46 +152,38 @@ impl SessionRepo {
         persona_id: &str,
         agent_id: &str,
     ) -> Result<Session> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
         // Try to find existing session for this channel + agent
-        let existing: Option<Session> = conn
-            .query_row(
-                "SELECT id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at
-                 FROM sessions WHERE channel = ?1 AND channel_id = ?2 AND agent_id = ?3",
-                [channel, channel_id, agent_id],
-                |row| {
-                    Ok(Session {
-                        id: row.get(0)?,
-                        user_id: row.get(1)?,
-                        channel: row.get(2)?,
-                        channel_id: row.get(3)?,
-                        persona_id: row.get(4)?,
-                        agent_id: row.get(5)?,
-                        created_at: parse_datetime(&row.get::<_, String>(6)?),
-                        updated_at: parse_datetime(&row.get::<_, String>(7)?),
-                    })
-                },
-            )
-            .ok();
+        let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions
+             WHERE channel = $1 AND channel_id = $2 AND agent_id = $3"
+        )))
+        .bind(channel.to_string())
+        .bind(channel_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?;
 
-        if let Some(session) = existing {
-            return Ok(session);
+        if let Some(row) = existing {
+            return Session::from_row(&row);
         }
 
         // Create new session
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO sessions (id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-            rusqlite::params![&id, user_id, channel, channel_id, persona_id, agent_id, &now],
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
         )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        .bind(id.clone())
+        .bind(user_id.to_string())
+        .bind(channel.to_string())
+        .bind(channel_id.to_string())
+        .bind(persona_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(now)
+        .execute(self.pool.pool())
+        .await?;
 
         Ok(Session {
             id,
@@ -168,37 +202,17 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list_all(&self) -> Result<Vec<Session>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn list_all(&self) -> Result<Vec<Session>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY updated_at DESC"
+        )))
+        .fetch_all(self.pool.pool())
+        .await?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, user_id, channel, channel_id, persona_id, agent_id, created_at, updated_at
-                 FROM sessions ORDER BY updated_at DESC",
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sessions = stmt
-            .query_map([], |row| {
-                Ok(Session {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    channel: row.get(2)?,
-                    channel_id: row.get(3)?,
-                    persona_id: row.get(4)?,
-                    agent_id: row.get(5)?,
-                    created_at: parse_datetime(&row.get::<_, String>(6)?),
-                    updated_at: parse_datetime(&row.get::<_, String>(7)?),
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        Ok(sessions)
+        Ok(rows
+            .iter()
+            .filter_map(|row| Session::from_row(row).ok())
+            .collect())
     }
 
     /// Add a message to a session
@@ -206,13 +220,14 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn add_message(
+    pub async fn add_message(
         &self,
         session_id: &str,
         role: MessageRole,
         content: &str,
     ) -> Result<Message> {
         self.add_message_with_thread(session_id, role, content, None)
+            .await
     }
 
     /// Add a message to a session with thread context
@@ -220,35 +235,40 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn add_message_with_thread(
+    pub async fn add_message_with_thread(
         &self,
         session_id: &str,
         role: MessageRole,
         content: &str,
         thread_id: Option<&str>,
     ) -> Result<Message> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let now_str = now.to_rfc3339();
 
-        conn.execute(
+        let mut tx = self.pool.pool().begin().await?;
+
+        sqlx::query(
             "INSERT INTO messages (id, session_id, role, content, created_at, thread_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![&id, session_id, role.as_str(), content, &now_str, thread_id],
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        .bind(id.clone())
+        .bind(session_id.to_string())
+        .bind(role.as_str())
+        .bind(content.to_string())
+        .bind(now_str.clone())
+        .bind(thread_id.map(String::from))
+        .execute(&mut *tx)
+        .await?;
 
         // Update session updated_at
-        conn.execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            [&now_str, session_id],
-        )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        sqlx::query("UPDATE sessions SET updated_at = $1 WHERE id = $2")
+            .bind(now_str)
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
 
         Ok(Message {
             id,
@@ -265,40 +285,21 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn get_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages WHERE session_id = $1
+             ORDER BY created_at DESC LIMIT $2"
+        )))
+        .bind(session_id.to_string())
+        .bind(limit_param(limit))
+        .fetch_all(self.pool.pool())
+        .await?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, session_id, role, content, created_at, thread_id
-                 FROM messages WHERE session_id = ?1
-                 ORDER BY created_at DESC LIMIT ?2",
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let messages = stmt
-            .query_map([session_id, &limit.to_string()], |row| {
-                Ok(Message {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: MessageRole::from_str(&row.get::<_, String>(2)?)
-                        .unwrap_or(MessageRole::User),
-                    content: row.get(3)?,
-                    created_at: parse_datetime(&row.get::<_, String>(4)?),
-                    thread_id: row.get(5)?,
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect::<Vec<_>>()
-            .into_iter()
+        Ok(rows
+            .iter()
+            .filter_map(|row| Message::from_row(row).ok())
             .rev()
-            .collect();
-
-        Ok(messages)
+            .collect())
     }
 
     /// Get recent messages for a specific thread within a session
@@ -308,70 +309,40 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_messages_in_thread(
+    pub async fn get_messages_in_thread(
         &self,
         session_id: &str,
         thread_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Message>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let messages = if let Some(tid) = thread_id {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, session_id, role, content, created_at, thread_id
-                     FROM messages WHERE session_id = ?1 AND thread_id = ?2
-                     ORDER BY created_at DESC LIMIT ?3",
-                )
-                .map_err(|e| Error::Database(e.to_string()))?;
-
-            #[allow(clippy::cast_possible_wrap)]
-            stmt.query_map(rusqlite::params![session_id, tid, limit as i64], |row| {
-                Ok(Message {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: MessageRole::from_str(&row.get::<_, String>(2)?)
-                        .unwrap_or(MessageRole::User),
-                    content: row.get(3)?,
-                    created_at: parse_datetime(&row.get::<_, String>(4)?),
-                    thread_id: row.get(5)?,
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect::<Vec<_>>()
+        let rows = if let Some(tid) = thread_id {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE session_id = $1 AND thread_id = $2
+                 ORDER BY created_at DESC LIMIT $3"
+            )))
+            .bind(session_id.to_string())
+            .bind(tid.to_string())
+            .bind(limit_param(limit))
+            .fetch_all(self.pool.pool())
+            .await?
         } else {
             // Get messages with no thread (root level)
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, session_id, role, content, created_at, thread_id
-                     FROM messages WHERE session_id = ?1 AND thread_id IS NULL
-                     ORDER BY created_at DESC LIMIT ?2",
-                )
-                .map_err(|e| Error::Database(e.to_string()))?;
-
-            #[allow(clippy::cast_possible_wrap)]
-            stmt.query_map(rusqlite::params![session_id, limit as i64], |row| {
-                Ok(Message {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: MessageRole::from_str(&row.get::<_, String>(2)?)
-                        .unwrap_or(MessageRole::User),
-                    content: row.get(3)?,
-                    created_at: parse_datetime(&row.get::<_, String>(4)?),
-                    thread_id: row.get(5)?,
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect::<Vec<_>>()
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE session_id = $1 AND thread_id IS NULL
+                 ORDER BY created_at DESC LIMIT $2"
+            )))
+            .bind(session_id.to_string())
+            .bind(limit_param(limit))
+            .fetch_all(self.pool.pool())
+            .await?
         };
 
         // Reverse to get chronological order
-        Ok(messages.into_iter().rev().collect())
+        Ok(rows
+            .iter()
+            .filter_map(|row| Message::from_row(row).ok())
+            .rev()
+            .collect())
     }
 
     /// Delete messages in a session older than the given message ID
@@ -381,27 +352,24 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn delete_messages_before(&self, session_id: &str, before_id: &str) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn delete_messages_before(&self, session_id: &str, before_id: &str) -> Result<usize> {
         // Find the created_at of the cutoff message
-        let cutoff: String = conn
-            .query_row(
-                "SELECT created_at FROM messages WHERE id = ?1 AND session_id = ?2",
-                [before_id, session_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| Error::Database(format!("cutoff message not found: {e}")))?;
+        let cutoff: String =
+            sqlx::query_scalar("SELECT created_at FROM messages WHERE id = $1 AND session_id = $2")
+                .bind(before_id.to_string())
+                .bind(session_id.to_string())
+                .fetch_optional(self.pool.pool())
+                .await?
+                .ok_or_else(|| Error::Database("cutoff message not found".to_string()))?;
 
-        let deleted = conn.execute(
-            "DELETE FROM messages WHERE session_id = ?1 AND created_at < ?2",
-            [session_id, &cutoff],
-        )?;
+        let deleted = sqlx::query("DELETE FROM messages WHERE session_id = $1 AND created_at < $2")
+            .bind(session_id.to_string())
+            .bind(cutoff)
+            .execute(self.pool.pool())
+            .await?
+            .rows_affected();
 
-        Ok(deleted)
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
     }
 
     /// Insert a compaction summary as a system message at the start of a session
@@ -409,20 +377,13 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn insert_summary(&self, session_id: &str, summary: &str) -> Result<Message> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn insert_summary(&self, session_id: &str, summary: &str) -> Result<Message> {
         // Find the earliest message timestamp in the session
-        let earliest: Option<String> = conn
-            .query_row(
-                "SELECT MIN(created_at) FROM messages WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .ok();
+        let earliest: Option<String> =
+            sqlx::query_scalar("SELECT MIN(created_at) FROM messages WHERE session_id = $1")
+                .bind(session_id.to_string())
+                .fetch_one(self.pool.pool())
+                .await?;
 
         // Set summary timestamp slightly before the earliest remaining message
         let summary_time = earliest
@@ -435,12 +396,17 @@ impl SessionRepo {
 
         let id = Uuid::new_v4().to_string();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO messages (id, session_id, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![id, session_id, "system", summary, summary_time],
+             VALUES ($1, $2, $3, $4, $5)",
         )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        .bind(id.clone())
+        .bind(session_id.to_string())
+        .bind("system")
+        .bind(summary.to_string())
+        .bind(summary_time.clone())
+        .execute(self.pool.pool())
+        .await?;
 
         Ok(Message {
             id,
@@ -458,17 +424,19 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
+        let mut tx = self.pool.pool().begin().await?;
 
-        conn.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])
-            .map_err(|e| Error::Database(e.to_string()))?;
-        conn.execute("DELETE FROM sessions WHERE id = ?1", [session_id])
-            .map_err(|e| Error::Database(e.to_string()))?;
+        sqlx::query("DELETE FROM messages WHERE session_id = $1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -479,38 +447,26 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn prune_older_than(&self, days: i64) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn prune_older_than(&self, days: i64) -> Result<usize> {
         let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
-
-        // Get session IDs to delete
-        let mut stmt = conn
-            .prepare("SELECT id FROM sessions WHERE updated_at < ?1")
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let session_ids: Vec<String> = stmt
-            .query_map([&cutoff], |row| row.get(0))
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        let count = session_ids.len();
+        let mut tx = self.pool.pool().begin().await?;
 
         // Delete messages first (foreign key)
-        for sid in &session_ids {
-            conn.execute("DELETE FROM messages WHERE session_id = ?1", [sid])
-                .map_err(|e| Error::Database(e.to_string()))?;
-        }
+        sqlx::query(
+            "DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < $1)",
+        )
+        .bind(cutoff.clone())
+        .execute(&mut *tx)
+        .await?;
 
-        // Delete sessions
-        conn.execute("DELETE FROM sessions WHERE updated_at < ?1", [&cutoff])
-            .map_err(|e| Error::Database(e.to_string()))?;
+        let deleted = sqlx::query("DELETE FROM sessions WHERE updated_at < $1")
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
 
-        Ok(count)
+        tx.commit().await?;
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
     }
 
     /// Count total sessions
@@ -518,15 +474,10 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn count(&self) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn count(&self) -> Result<usize> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(self.pool.pool())
+            .await?;
 
         Ok(usize::try_from(count).unwrap_or(0))
     }
@@ -536,19 +487,12 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn disk_usage(&self) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let total: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn disk_usage(&self) -> Result<usize> {
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(COALESCE(SUM(LENGTH(content)), 0) AS BIGINT) FROM messages",
+        )
+        .fetch_one(self.pool.pool())
+        .await?;
 
         Ok(usize::try_from(total).unwrap_or(0))
     }
@@ -558,19 +502,11 @@ impl SessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn message_count(&self, session_id: &str) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn message_count(&self, session_id: &str) -> Result<usize> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id = $1")
+            .bind(session_id.to_string())
+            .fetch_one(self.pool.pool())
+            .await?;
 
         Ok(usize::try_from(count).unwrap_or(0))
     }
@@ -585,23 +521,25 @@ mod tests {
     use super::*;
     use crate::db::init_memory;
 
-    fn setup() -> SessionRepo {
-        let pool = init_memory().unwrap();
+    async fn setup() -> SessionRepo {
+        let pool = init_memory().await.unwrap();
 
         // Create a test user
-        let conn = pool.get().unwrap();
-        conn.execute("INSERT INTO users (id) VALUES ('test-user')", [])
+        sqlx::query("INSERT INTO users (id) VALUES ('test-user')")
+            .execute(pool.pool())
+            .await
             .unwrap();
 
         SessionRepo::new(pool)
     }
 
-    #[test]
-    fn test_find_or_create_session() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_find_or_create_session() {
+        let repo = setup().await;
 
         let session = repo
             .find_or_create("test-user", "discord", "channel-123", "orin")
+            .await
             .unwrap();
 
         assert_eq!(session.channel, "discord");
@@ -610,41 +548,47 @@ mod tests {
         // Should return same session
         let session2 = repo
             .find_or_create("test-user", "discord", "channel-123", "orin")
+            .await
             .unwrap();
 
         assert_eq!(session.id, session2.id);
     }
 
-    #[test]
-    fn test_add_and_get_messages() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_add_and_get_messages() {
+        let repo = setup().await;
 
         let session = repo
             .find_or_create("test-user", "voice", "local", "orin")
+            .await
             .unwrap();
 
         repo.add_message(&session.id, MessageRole::User, "Hello")
+            .await
             .unwrap();
         repo.add_message(&session.id, MessageRole::Assistant, "Hi there!")
+            .await
             .unwrap();
 
-        let messages = repo.get_messages(&session.id, 10).unwrap();
+        let messages = repo.get_messages(&session.id, 10).await.unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "Hello");
         assert_eq!(messages[1].content, "Hi there!");
         assert!(messages[0].thread_id.is_none());
     }
 
-    #[test]
-    fn test_thread_messages() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_thread_messages() {
+        let repo = setup().await;
 
         let session = repo
             .find_or_create("test-user", "discord", "channel-123", "orin")
+            .await
             .unwrap();
 
         // Add root-level message
         repo.add_message(&session.id, MessageRole::User, "Root message")
+            .await
             .unwrap();
 
         // Add threaded messages
@@ -654,6 +598,7 @@ mod tests {
             "Thread message 1",
             Some("thread-abc"),
         )
+        .await
         .unwrap();
         repo.add_message_with_thread(
             &session.id,
@@ -661,39 +606,46 @@ mod tests {
             "Thread reply 1",
             Some("thread-abc"),
         )
+        .await
         .unwrap();
 
         // Get all messages
-        let all = repo.get_messages(&session.id, 10).unwrap();
+        let all = repo.get_messages(&session.id, 10).await.unwrap();
         assert_eq!(all.len(), 3);
 
         // Get only root-level messages
-        let root = repo.get_messages_in_thread(&session.id, None, 10).unwrap();
+        let root = repo
+            .get_messages_in_thread(&session.id, None, 10)
+            .await
+            .unwrap();
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].content, "Root message");
 
         // Get only threaded messages
         let threaded = repo
             .get_messages_in_thread(&session.id, Some("thread-abc"), 10)
+            .await
             .unwrap();
         assert_eq!(threaded.len(), 2);
         assert_eq!(threaded[0].content, "Thread message 1");
         assert_eq!(threaded[1].content, "Thread reply 1");
     }
 
-    #[test]
-    fn test_message_count() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_message_count() {
+        let repo = setup().await;
 
         let session = repo
             .find_or_create("test-user", "slack", "channel-456", "orin")
+            .await
             .unwrap();
 
-        assert_eq!(repo.message_count(&session.id).unwrap(), 0);
+        assert_eq!(repo.message_count(&session.id).await.unwrap(), 0);
 
         repo.add_message(&session.id, MessageRole::User, "Test")
+            .await
             .unwrap();
 
-        assert_eq!(repo.message_count(&session.id).unwrap(), 1);
+        assert_eq!(repo.message_count(&session.id).await.unwrap(), 1);
     }
 }

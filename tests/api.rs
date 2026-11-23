@@ -129,7 +129,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
 
 #[tokio::test]
 async fn test_health_endpoint() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
     let app = build_test_router(db);
 
     let response = app
@@ -155,7 +155,7 @@ async fn test_health_endpoint() {
 
 #[tokio::test]
 async fn test_ready_endpoint() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
     let app = build_test_router(db);
 
     let response = app
@@ -183,7 +183,7 @@ async fn test_ready_endpoint() {
 
 #[tokio::test]
 async fn test_admin_sessions_requires_auth() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
     let app = build_test_router(db);
 
     // Request without API key should fail
@@ -202,7 +202,7 @@ async fn test_admin_sessions_requires_auth() {
 
 #[tokio::test]
 async fn test_admin_sessions_with_auth() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
     let app = build_test_router(db);
 
     let response = app
@@ -221,7 +221,7 @@ async fn test_admin_sessions_with_auth() {
 
 #[tokio::test]
 async fn test_admin_users_endpoint() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
     let app = build_test_router(db);
 
     let response = app
@@ -247,16 +247,17 @@ async fn test_admin_users_endpoint() {
 
 #[tokio::test]
 async fn test_admin_session_messages() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     // Create a user and session first
-    let user = create_test_user(&db, "test-external-id");
-    let session = create_test_session(&db, &user.id, "test", "channel-123", "test-persona");
+    let user = create_test_user(&db, "test-external-id").await;
+    let session = create_test_session(&db, &user.id, "test", "channel-123", "test-persona").await;
 
     // Add a message
     let session_repo = beacon_gateway::db::SessionRepo::new(db.clone());
     session_repo
         .add_message(&session.id, beacon_gateway::db::MessageRole::User, "Hello")
+        .await
         .unwrap();
 
     let app = build_test_router(db);
@@ -284,32 +285,34 @@ async fn test_admin_session_messages() {
     assert_eq!(json[0]["content"], "Hello");
 }
 
-#[test]
-fn test_system_prompt_uses_selected_persona() {
-    let state = build_test_state(setup_test_db());
+#[tokio::test]
+async fn test_system_prompt_uses_selected_persona() {
+    let state = build_test_state(setup_test_db().await);
 
-    let prompt = state.system_prompt_for_persona(
-        None,
-        "Microcap",
-        Some("You are Microcap, a swaggering pink diamond."),
-    );
+    let prompt = state
+        .system_prompt_for_persona(
+            None,
+            "Microcap",
+            Some("You are Microcap, a swaggering pink diamond."),
+        )
+        .await;
 
     assert!(prompt.contains("Microcap"), "prompt: {prompt}");
     assert!(!prompt.contains("TestBot"), "prompt: {prompt}");
 }
 
-#[test]
-fn test_system_prompt_defaults_to_boot_persona() {
-    let state = build_test_state(setup_test_db());
+#[tokio::test]
+async fn test_system_prompt_defaults_to_boot_persona() {
+    let state = build_test_state(setup_test_db().await);
 
-    let prompt = state.system_prompt_with_skills(None);
+    let prompt = state.system_prompt_with_skills(None).await;
 
     assert!(prompt.contains("TestBot"), "prompt: {prompt}");
 }
 
 /// Activate the embedded Microcap persona and return the gateway's fallback persona id
 async fn activate_microcap(cloud_mode: bool) -> String {
-    let state = build_test_state_with_mode(setup_test_db(), cloud_mode);
+    let state = build_test_state_with_mode(setup_test_db().await, cloud_mode);
     let app = beacon_gateway::api::health::ready_router(state.clone());
 
     let response = app
@@ -373,7 +376,7 @@ async fn guarded_status(
 
 #[tokio::test]
 async fn test_cloud_guard_refuses_admin_without_key() {
-    let state = build_test_state_with(setup_test_db(), true, Some("test-api-key"));
+    let state = build_test_state_with(setup_test_db().await, true, Some("test-api-key"));
 
     assert_eq!(
         guarded_status(state.clone(), "GET", "/api/admin/sessions", None).await,
@@ -391,7 +394,7 @@ async fn test_cloud_guard_refuses_admin_without_key() {
 
 #[tokio::test]
 async fn test_cloud_guard_fails_closed_without_configured_key() {
-    let state = build_test_state_with(setup_test_db(), true, None);
+    let state = build_test_state_with(setup_test_db().await, true, None);
 
     assert_eq!(
         guarded_status(state.clone(), "GET", "/api/admin/sessions", None).await,
@@ -405,7 +408,7 @@ async fn test_cloud_guard_fails_closed_without_configured_key() {
 
 #[tokio::test]
 async fn test_cloud_guard_blocks_skill_installs() {
-    let state = build_test_state_with(setup_test_db(), true, Some("test-api-key"));
+    let state = build_test_state_with(setup_test_db().await, true, Some("test-api-key"));
 
     for (method, uri) in [
         ("POST", "/api/skills/install/local"),
@@ -422,7 +425,7 @@ async fn test_cloud_guard_blocks_skill_installs() {
 
 #[tokio::test]
 async fn test_guard_leaves_self_hosted_gateways_alone() {
-    let state = build_test_state_with(setup_test_db(), false, None);
+    let state = build_test_state_with(setup_test_db().await, false, None);
 
     assert_eq!(
         guarded_status(state, "GET", "/api/admin/sessions", None).await,

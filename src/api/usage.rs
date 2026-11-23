@@ -59,14 +59,13 @@ async fn get_usage(
             |dt| dt.with_timezone(&Utc),
         );
 
-    let records = state
-        .usage_repo
-        .as_ref()
-        .map(|repo| {
-            repo.query_by_time_range(&since, None, query.model.as_deref())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let records = match state.usage_repo.as_ref() {
+        Some(repo) => repo
+            .query_by_time_range(&since, None, query.model.as_deref())
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
 
     let total_input_tokens: u64 = records.iter().map(|r| u64::from(r.input_tokens)).sum();
     let total_output_tokens: u64 = records.iter().map(|r| u64::from(r.output_tokens)).sum();

@@ -75,7 +75,7 @@ async fn health() -> Json<HealthResponse> {
 
 /// Readiness probe - is the service ready to accept traffic?
 async fn ready(State(state): State<Arc<ApiState>>) -> (StatusCode, Json<ReadinessResponse>) {
-    let db_check = check_database(&state);
+    let db_check = check_database(&state).await;
     let agent_check = check_agent(&state);
 
     let all_ok = db_check.status == "ok"
@@ -101,16 +101,10 @@ async fn ready(State(state): State<Arc<ApiState>>) -> (StatusCode, Json<Readines
 }
 
 /// Check database connectivity
-fn check_database(state: &ApiState) -> CheckResult {
-    match state.db.get() {
-        Ok(conn) => {
-            // Try a simple query to verify the connection works
-            match conn.query_row("SELECT 1", [], |_| Ok(())) {
-                Ok(()) => CheckResult::ok(),
-                Err(e) => CheckResult::fail(format!("query failed: {e}")),
-            }
-        }
-        Err(e) => CheckResult::fail(format!("connection failed: {e}")),
+async fn check_database(state: &ApiState) -> CheckResult {
+    match sqlx::query("SELECT 1").execute(state.db.pool()).await {
+        Ok(_) => CheckResult::ok(),
+        Err(e) => CheckResult::fail(format!("query failed: {e}")),
     }
 }
 

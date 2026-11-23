@@ -82,7 +82,7 @@ pub async fn handle_activity(
     );
 
     // Find or create user and session
-    let user = match state.user_repo.find_or_create(&sender_id) {
+    let user = match state.user_repo.find_or_create(&sender_id).await {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "failed to find/create user");
@@ -91,22 +91,23 @@ pub async fn handle_activity(
     };
 
     let channel_id = conversation.id.clone();
-    let session =
-        match state
-            .session_repo
-            .find_or_create(&user.id, "teams", &channel_id, &state.persona_id)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to find/create session");
-                return (StatusCode::OK, Json(WebhookResponse { ok: true }));
-            }
-        };
+    let session = match state
+        .session_repo
+        .find_or_create(&user.id, "teams", &channel_id, &state.persona_id)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to find/create session");
+            return (StatusCode::OK, Json(WebhookResponse { ok: true }));
+        }
+    };
 
     // Store user message
     if let Err(e) = state
         .session_repo
         .add_message(&session.id, MessageRole::User, text)
+        .await
     {
         tracing::warn!(error = %e, "failed to store user message");
     }
@@ -117,14 +118,16 @@ pub async fn handle_activity(
         state.persona_system_prompt.clone(),
     );
     let context_builder = ContextBuilder::new(context_config);
-    let built_context = context_builder.build_with_memory(
-        &session.id,
-        &user.id,
-        user.life_json_path.as_deref(),
-        &state.session_repo,
-        &state.user_repo,
-        Some((&state.memory_repo, text)),
-    );
+    let built_context = context_builder
+        .build_with_memory(
+            &session.id,
+            &user.id,
+            user.life_json_path.as_deref(),
+            &state.session_repo,
+            &state.user_repo,
+            Some((&state.memory_repo, text)),
+        )
+        .await;
 
     if let Ok(ctx) = &built_context {
         tracing::debug!(
@@ -144,7 +147,7 @@ pub async fn handle_activity(
     let request = synapse_client::ChatRequest {
         model: state.llm_model.clone(),
         messages: vec![
-            synapse_client::Message::system(&state.system_prompt_with_skills(None)),
+            synapse_client::Message::system(&state.system_prompt_with_skills(None).await),
             synapse_client::Message::user(&augmented_prompt),
         ],
         stream: false,
@@ -172,6 +175,7 @@ pub async fn handle_activity(
     if let Err(e) = state
         .session_repo
         .add_message(&session.id, MessageRole::Assistant, &response)
+        .await
     {
         tracing::warn!(error = %e, "failed to store assistant message");
     }

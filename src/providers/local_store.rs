@@ -28,26 +28,23 @@ impl LocalKeyStore {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn get(&self, provider: &str) -> Result<Option<StoredKey>> {
-        let conn = self
-            .db
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        let result = conn.query_row(
-            "SELECT api_key, model_preference FROM local_provider_keys WHERE provider = ?1",
-            rusqlite::params![provider],
-            |row| {
-                Ok(StoredKey {
-                    api_key: row.get(0)?,
-                    model_preference: row.get(1)?,
-                })
-            },
-        );
-        match result {
-            Ok(key) => Ok(Some(key)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(crate::Error::Database(e.to_string())),
-        }
+    pub async fn get(&self, provider: &str) -> Result<Option<StoredKey>> {
+        use sqlx::Row;
+
+        let row = sqlx::query(
+            "SELECT api_key, model_preference FROM local_provider_keys WHERE provider = $1",
+        )
+        .bind(provider.to_string())
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        row.map(|row| {
+            Ok(StoredKey {
+                api_key: row.try_get(0)?,
+                model_preference: row.try_get(1)?,
+            })
+        })
+        .transpose()
     }
 
     /// Insert or replace the key for a provider
@@ -55,21 +52,26 @@ impl LocalKeyStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
-    pub fn set(&self, provider: &str, api_key: &str, model_preference: Option<&str>) -> Result<()> {
-        let conn = self
-            .db
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        conn.execute(
+    pub async fn set(
+        &self,
+        provider: &str,
+        api_key: &str,
+        model_preference: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
             "INSERT INTO local_provider_keys (provider, api_key, model_preference, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(provider) DO UPDATE SET
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (provider) DO UPDATE SET
                 api_key = excluded.api_key,
                 model_preference = excluded.model_preference,
                 updated_at = excluded.updated_at",
-            rusqlite::params![provider, api_key, model_preference],
         )
-        .map_err(|e| crate::Error::Database(e.to_string()))?;
+        .bind(provider.to_string())
+        .bind(api_key.to_string())
+        .bind(model_preference.map(str::to_string))
+        .bind(crate::db::now())
+        .execute(self.db.pool())
+        .await?;
         Ok(())
     }
 
@@ -78,16 +80,11 @@ impl LocalKeyStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
-    pub fn remove(&self, provider: &str) -> Result<()> {
-        let conn = self
-            .db
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        conn.execute(
-            "DELETE FROM local_provider_keys WHERE provider = ?1",
-            rusqlite::params![provider],
-        )
-        .map_err(|e| crate::Error::Database(e.to_string()))?;
+    pub async fn remove(&self, provider: &str) -> Result<()> {
+        sqlx::query("DELETE FROM local_provider_keys WHERE provider = $1")
+            .bind(provider.to_string())
+            .execute(self.db.pool())
+            .await?;
         Ok(())
     }
 
@@ -96,20 +93,12 @@ impl LocalKeyStore {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn list_configured(&self) -> Result<Vec<String>> {
-        let conn = self
-            .db
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        let mut stmt = conn
-            .prepare("SELECT provider FROM local_provider_keys")
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        let providers: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| crate::Error::Database(e.to_string()))?
-            .flatten()
-            .collect();
-        Ok(providers)
+    pub async fn list_configured(&self) -> Result<Vec<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT provider FROM local_provider_keys")
+                .fetch_all(self.db.pool())
+                .await?,
+        )
     }
 }
 
@@ -117,32 +106,32 @@ impl LocalKeyStore {
 mod tests {
     use super::*;
 
-    fn test_db() -> crate::db::DbPool {
-        crate::db::init_memory().unwrap()
+    async fn test_db() -> crate::db::DbPool {
+        crate::db::init_memory().await.unwrap()
     }
 
-    #[test]
-    fn set_and_get_key() {
-        let store = LocalKeyStore::new(test_db());
-        store.set("anthropic", "sk-ant-test", None).unwrap();
-        let key = store.get("anthropic").unwrap();
+    #[tokio::test]
+    async fn set_and_get_key() {
+        let store = LocalKeyStore::new(test_db().await);
+        store.set("anthropic", "sk-ant-test", None).await.unwrap();
+        let key = store.get("anthropic").await.unwrap();
         assert_eq!(key.unwrap().api_key, "sk-ant-test");
     }
 
-    #[test]
-    fn remove_key() {
-        let store = LocalKeyStore::new(test_db());
-        store.set("openai", "sk-openai-test", None).unwrap();
-        store.remove("openai").unwrap();
-        assert!(store.get("openai").unwrap().is_none());
+    #[tokio::test]
+    async fn remove_key() {
+        let store = LocalKeyStore::new(test_db().await);
+        store.set("openai", "sk-openai-test", None).await.unwrap();
+        store.remove("openai").await.unwrap();
+        assert!(store.get("openai").await.unwrap().is_none());
     }
 
-    #[test]
-    fn list_configured_providers() {
-        let store = LocalKeyStore::new(test_db());
-        store.set("anthropic", "sk-ant-test", None).unwrap();
-        store.set("openai", "sk-openai-test", None).unwrap();
-        let configured = store.list_configured().unwrap();
+    #[tokio::test]
+    async fn list_configured_providers() {
+        let store = LocalKeyStore::new(test_db().await);
+        store.set("anthropic", "sk-ant-test", None).await.unwrap();
+        store.set("openai", "sk-openai-test", None).await.unwrap();
+        let configured = store.list_configured().await.unwrap();
         assert!(configured.contains(&"anthropic".to_string()));
         assert!(configured.contains(&"openai".to_string()));
         assert!(!configured.contains(&"openrouter".to_string()));

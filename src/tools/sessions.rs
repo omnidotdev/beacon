@@ -61,23 +61,21 @@ impl SessionTools {
     /// # Errors
     ///
     /// Returns an error if the database query fails
-    pub fn list(&self) -> Result<Vec<SessionInfo>> {
-        let sessions = self.session_repo.list_all()?;
+    pub async fn list(&self) -> Result<Vec<SessionInfo>> {
+        let sessions = self.session_repo.list_all().await?;
 
-        let infos = sessions
-            .into_iter()
-            .map(|s| {
-                let message_count = self.session_repo.message_count(&s.id).unwrap_or(0);
-                SessionInfo {
-                    id: s.id,
-                    channel: s.channel,
-                    channel_id: s.channel_id,
-                    user_id: s.user_id,
-                    message_count,
-                    updated_at: s.updated_at.to_rfc3339(),
-                }
-            })
-            .collect();
+        let mut infos = Vec::with_capacity(sessions.len());
+        for s in sessions {
+            let message_count = self.session_repo.message_count(&s.id).await.unwrap_or(0);
+            infos.push(SessionInfo {
+                id: s.id,
+                channel: s.channel,
+                channel_id: s.channel_id,
+                user_id: s.user_id,
+                message_count,
+                updated_at: s.updated_at.to_rfc3339(),
+            });
+        }
 
         Ok(infos)
     }
@@ -92,8 +90,8 @@ impl SessionTools {
     /// # Errors
     ///
     /// Returns an error if the database query fails
-    pub fn history(&self, session_id: &str, limit: usize) -> Result<Vec<MessageInfo>> {
-        let messages = self.session_repo.get_messages(session_id, limit)?;
+    pub async fn history(&self, session_id: &str, limit: usize) -> Result<Vec<MessageInfo>> {
+        let messages = self.session_repo.get_messages(session_id, limit).await?;
 
         let infos = messages
             .into_iter()
@@ -124,9 +122,10 @@ impl SessionTools {
     /// # Errors
     ///
     /// Returns an error if the database operation fails
-    pub fn send(&self, session_id: &str, content: &str) -> Result<()> {
+    pub async fn send(&self, session_id: &str, content: &str) -> Result<()> {
         self.session_repo
-            .add_message(session_id, MessageRole::System, content)?;
+            .add_message(session_id, MessageRole::System, content)
+            .await?;
         Ok(())
     }
 }
@@ -136,62 +135,68 @@ mod tests {
     use super::*;
     use crate::db::init_memory;
 
-    fn setup() -> SessionTools {
-        let pool = init_memory().unwrap();
+    async fn setup() -> SessionTools {
+        let pool = init_memory().await.unwrap();
 
         // Create a test user
-        let conn = pool.get().unwrap();
-        conn.execute("INSERT INTO users (id) VALUES ('test-user')", [])
+        sqlx::query("INSERT INTO users (id) VALUES ('test-user')")
+            .execute(pool.pool())
+            .await
             .unwrap();
 
         let session_repo = SessionRepo::new(pool);
         SessionTools::new(session_repo)
     }
 
-    #[test]
-    fn test_list_empty() {
-        let tools = setup();
-        let sessions = tools.list().unwrap();
+    #[tokio::test]
+    async fn test_list_empty() {
+        let tools = setup().await;
+        let sessions = tools.list().await.unwrap();
         assert!(sessions.is_empty());
     }
 
-    #[test]
-    fn test_list_with_sessions() {
-        let tools = setup();
+    #[tokio::test]
+    async fn test_list_with_sessions() {
+        let tools = setup().await;
 
         // Create some sessions
         tools
             .session_repo
             .find_or_create("test-user", "voice", "local", "orin")
+            .await
             .unwrap();
         tools
             .session_repo
             .find_or_create("test-user", "discord", "channel-123", "orin")
+            .await
             .unwrap();
 
-        let sessions = tools.list().unwrap();
+        let sessions = tools.list().await.unwrap();
         assert_eq!(sessions.len(), 2);
     }
 
-    #[test]
-    fn test_history() {
-        let tools = setup();
+    #[tokio::test]
+    async fn test_history() {
+        let tools = setup().await;
 
         let session = tools
             .session_repo
             .find_or_create("test-user", "voice", "local", "orin")
+            .await
             .unwrap();
 
         tools
             .session_repo
             .add_message(&session.id, MessageRole::User, "Hello")
+            .await
             .unwrap();
         tools
             .session_repo
             .add_message(&session.id, MessageRole::Assistant, "Hi there!")
+            .await
             .unwrap();
 
-        let history = tools.history(&session.id, 10).unwrap();
+        let history = tools.history(&session.id, 10).await.unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "user");
         assert_eq!(history[0].content, "Hello");
@@ -199,20 +204,22 @@ mod tests {
         assert_eq!(history[1].content, "Hi there!");
     }
 
-    #[test]
-    fn test_send() {
-        let tools = setup();
+    #[tokio::test]
+    async fn test_send() {
+        let tools = setup().await;
 
         let session = tools
             .session_repo
             .find_or_create("test-user", "voice", "local", "orin")
+            .await
             .unwrap();
 
         tools
             .send(&session.id, "Cross-session message from another agent")
+            .await
             .unwrap();
 
-        let history = tools.history(&session.id, 10).unwrap();
+        let history = tools.history(&session.id, 10).await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, "system");
         assert_eq!(

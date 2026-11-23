@@ -625,7 +625,10 @@ mod tests {
         .unwrap()
         .unwrap();
         let state = BillingState::from_config(config).unwrap();
-        state.workspaces.remember("paid-user", "paid-workspace");
+        state
+            .workspaces
+            .remember("paid-user", "paid-workspace")
+            .await;
         state.cache.put_tier(
             &BillingEntity::organization("paid-workspace"),
             PlanTier::Paid,
@@ -650,7 +653,7 @@ mod tests {
             PlanTier::Paid,
         );
         assert_eq!(state.user_tier("u").await, PlanTier::Free);
-        state.workspaces.remember("u", "personal-workspace");
+        state.workspaces.remember("u", "personal-workspace").await;
         state.cache.put_tier(
             &BillingEntity::organization("personal-workspace"),
             PlanTier::Free,

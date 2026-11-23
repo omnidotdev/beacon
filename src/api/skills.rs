@@ -244,7 +244,7 @@ fn available_skill_to_response(skill: &Skill) -> SkillResponse {
 async fn list_installed(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SkillListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let skills = state.skill_repo.list().map_err(|e| {
+    let skills = state.skill_repo.list().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -268,6 +268,7 @@ async fn get_skill(
     let skill = state
         .skill_repo
         .get(&skill_id)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -322,7 +323,7 @@ async fn install_skill(
     Json(req): Json<InstallSkillRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Check if already installed
-    if let Ok(Some(_)) = state.skill_repo.get_by_name(&req.skill_id) {
+    if let Ok(Some(_)) = state.skill_repo.get_by_name(&req.skill_id).await {
         return Err((
             StatusCode::CONFLICT,
             error_response("already_installed", "Skill is already installed"),
@@ -342,7 +343,7 @@ async fn install_skill(
         })?;
 
     // Install to database
-    let installed = state.skill_repo.install(&skill).map_err(|e| {
+    let installed = state.skill_repo.install(&skill).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -357,7 +358,7 @@ async fn install_local(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<InstallLocalRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), (StatusCode, Json<ErrorResponse>)> {
-    if let Ok(Some(_)) = state.skill_repo.get_by_name(&req.name) {
+    if let Ok(Some(_)) = state.skill_repo.get_by_name(&req.name).await {
         return Err((
             StatusCode::CONFLICT,
             error_response("already_installed", "Skill is already installed"),
@@ -396,6 +397,7 @@ async fn install_local(
     let installed = state
         .skill_repo
         .install_with_priority(&skill, priority, None)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -411,7 +413,7 @@ async fn uninstall_skill(
     State(state): State<Arc<ApiState>>,
     Path(skill_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let removed = state.skill_repo.uninstall(&skill_id).map_err(|e| {
+    let removed = state.skill_repo.uninstall(&skill_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -437,6 +439,7 @@ async fn set_enabled(
     let updated = state
         .skill_repo
         .set_enabled(&skill_id, req.enabled)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -454,6 +457,7 @@ async fn set_enabled(
     let skill = state
         .skill_repo
         .get(&skill_id)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -479,6 +483,7 @@ async fn set_priority(
     let updated = state
         .skill_repo
         .set_priority(&skill_id, req.priority)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -496,6 +501,7 @@ async fn set_priority(
     let skill = state
         .skill_repo
         .get(&skill_id)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -523,6 +529,7 @@ async fn update_skill(
         state
             .skill_repo
             .set_enabled(&skill_id, enabled)
+            .await
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -536,6 +543,7 @@ async fn update_skill(
         state
             .skill_repo
             .set_priority(&skill_id, priority)
+            .await
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -549,6 +557,7 @@ async fn update_skill(
         state
             .skill_repo
             .update_skill_config(&skill_id, req.api_key.as_deref(), req.env.as_ref())
+            .await
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -560,6 +569,7 @@ async fn update_skill(
     let skill = state
         .skill_repo
         .get(&skill_id)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -580,7 +590,7 @@ async fn update_skill(
 async fn skill_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SkillStatusReport>, (StatusCode, Json<ErrorResponse>)> {
-    let skills = state.skill_repo.list().map_err(|e| {
+    let skills = state.skill_repo.list().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -681,7 +691,7 @@ async fn skill_status(
 async fn list_commands(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<Vec<SkillCommandResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let skills = state.skill_repo.list_enabled().map_err(|e| {
+    let skills = state.skill_repo.list_enabled().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -717,6 +727,7 @@ async fn install_deps(
     let skill = state
         .skill_repo
         .get(&skill_id)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -765,7 +776,7 @@ async fn install_deps(
 async fn get_snapshot(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SkillSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    let skills = state.skill_repo.list().map_err(|e| {
+    let skills = state.skill_repo.list().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -808,6 +819,7 @@ async fn import_snapshot(
         if state
             .skill_repo
             .get_by_name(&entry.name)
+            .await
             .ok()
             .flatten()
             .is_some()
@@ -842,6 +854,7 @@ async fn import_snapshot(
         match state
             .skill_repo
             .install_with_priority(&skill, priority, None)
+            .await
         {
             Ok(installed) => {
                 // Apply api_key and env from snapshot
@@ -852,16 +865,18 @@ async fn import_snapshot(
                     } else {
                         Some(&entry.skill_env)
                     };
-                    let _ = state.skill_repo.update_skill_config(
-                        &installed.skill.id,
-                        entry.api_key.as_deref(),
-                        env,
-                    );
+                    let _ = state
+                        .skill_repo
+                        .update_skill_config(&installed.skill.id, entry.api_key.as_deref(), env)
+                        .await;
                 }
 
                 // Apply enabled state
                 if !entry.enabled {
-                    let _ = state.skill_repo.set_enabled(&installed.skill.id, false);
+                    let _ = state
+                        .skill_repo
+                        .set_enabled(&installed.skill.id, false)
+                        .await;
                 }
 
                 imported += 1;

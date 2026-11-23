@@ -102,7 +102,7 @@ pub struct InstallRequest {
 async fn list_installed(State(state): State<Arc<ApiState>>) -> Json<PersonaListResponse> {
     let persona_repo = PersonaRepo::new(state.db.clone());
 
-    let installed = persona_repo.list().unwrap_or_default();
+    let installed = persona_repo.list().await.unwrap_or_default();
 
     let personas: Vec<PersonaResponse> = installed
         .into_iter()
@@ -167,7 +167,7 @@ async fn get_persona(
 ) -> Result<Json<PersonaResponse>, (StatusCode, Json<ApiError>)> {
     let persona_repo = PersonaRepo::new(state.db.clone());
 
-    let installed = persona_repo.get(&persona_id).map_err(|e| {
+    let installed = persona_repo.get(&persona_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {
@@ -221,6 +221,7 @@ async fn install(
     let persona_repo = PersonaRepo::new(state.db.clone());
     let installed = persona_repo
         .install(&persona, &req.namespace)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -247,7 +248,7 @@ async fn uninstall(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let persona_repo = PersonaRepo::new(state.db.clone());
 
-    let removed = persona_repo.uninstall(&persona_id).map_err(|e| {
+    let removed = persona_repo.uninstall(&persona_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {

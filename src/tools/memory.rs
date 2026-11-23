@@ -119,7 +119,7 @@ impl BuiltinMemoryTools {
         match name {
             "memory_store" => self.store(arguments).await,
             "memory_search" => self.search(arguments).await,
-            "memory_forget" => self.forget(arguments),
+            "memory_forget" => self.forget(arguments).await,
             _ => Err(Error::Tool(format!("unknown memory tool: {name}"))),
         }
     }
@@ -155,7 +155,7 @@ impl BuiltinMemoryTools {
             }
         }
 
-        self.memory_repo.add(&memory)?;
+        self.memory_repo.add(&memory).await?;
 
         let response = serde_json::json!({
             "id": memory.id,
@@ -183,19 +183,18 @@ impl BuiltinMemoryTools {
 
         let memories = if let Some(ref ai) = self.memory_ai {
             match ai.embed(&args.query).await {
-                Ok(embedding) => self.memory_repo.search_hybrid(
-                    &self.user_id,
-                    &args.query,
-                    Some(&embedding),
-                    args.limit,
-                )?,
+                Ok(embedding) => {
+                    self.memory_repo
+                        .search_hybrid(&self.user_id, &args.query, Some(&embedding), args.limit)
+                        .await?
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "memory_search: embedding failed, falling back to text search");
-                    self.memory_repo.search(&self.user_id, &args.query)?
+                    self.memory_repo.search(&self.user_id, &args.query).await?
                 }
             }
         } else {
-            self.memory_repo.search(&self.user_id, &args.query)?
+            self.memory_repo.search(&self.user_id, &args.query).await?
         };
 
         let results: Vec<serde_json::Value> = memories
@@ -214,7 +213,7 @@ impl BuiltinMemoryTools {
         Ok(serde_json::json!({ "memories": results }).to_string())
     }
 
-    fn forget(&self, arguments: &str) -> Result<String> {
+    async fn forget(&self, arguments: &str) -> Result<String> {
         #[derive(serde::Deserialize)]
         struct ForgetArgs {
             id: String,
@@ -223,7 +222,7 @@ impl BuiltinMemoryTools {
         let args: ForgetArgs = serde_json::from_str(arguments)
             .map_err(|e| Error::Tool(format!("memory_forget: invalid arguments: {e}")))?;
 
-        let deleted = self.memory_repo.delete(&args.id)?;
+        let deleted = self.memory_repo.delete(&args.id).await?;
 
         let response = if deleted {
             serde_json::json!({ "status": "forgotten", "id": args.id })
@@ -259,17 +258,17 @@ impl ToolProvider for BuiltinMemoryTools {
 mod tests {
     use super::*;
 
-    fn make_tools() -> BuiltinMemoryTools {
-        let pool = crate::db::init_memory().unwrap();
+    async fn make_tools() -> BuiltinMemoryTools {
+        let pool = crate::db::init_memory().await.unwrap();
         let user_repo = crate::db::UserRepo::new(pool.clone());
-        let user = user_repo.find_or_create("test_user").unwrap();
+        let user = user_repo.find_or_create("test_user").await.unwrap();
         let repo = MemoryRepo::new(pool);
         BuiltinMemoryTools::new(repo, None, user.id)
     }
 
     #[tokio::test]
     async fn memory_store_creates_entry() {
-        let tools = make_tools();
+        let tools = make_tools().await;
         let result = tools
             .execute(
                 "memory_store",
@@ -285,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_search_returns_results() {
-        let tools = make_tools();
+        let tools = make_tools().await;
         // Store something first
         tools
             .execute("memory_store", r#"{"content":"User likes coffee"}"#)
@@ -300,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_forget_deletes_entry() {
-        let tools = make_tools();
+        let tools = make_tools().await;
         // Store and get an ID
         let stored = tools
             .execute("memory_store", r#"{"content":"Temporary memory"}"#)
@@ -328,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_returns_error() {
-        let tools = make_tools();
+        let tools = make_tools().await;
         let result = tools.execute("memory_unknown", "{}").await;
         assert!(result.is_err());
     }

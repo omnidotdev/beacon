@@ -161,12 +161,13 @@ impl ApiState {
     /// Uses budget-aware inclusion with per-user scoping.
     /// Falls back to the static `system_prompt` when no skills are installed.
     #[must_use]
-    pub fn system_prompt_with_skills(&self, user_id: Option<&str>) -> String {
+    pub async fn system_prompt_with_skills(&self, user_id: Option<&str>) -> String {
         self.system_prompt_for_persona(
             user_id,
             &self.persona_name,
             self.persona_system_prompt.as_deref(),
         )
+        .await
     }
 
     /// Build the system prompt for a specific persona with current enabled skills
@@ -175,7 +176,7 @@ impl ApiState {
     /// identity section must come from that persona rather than the one the
     /// gateway booted with
     #[must_use]
-    pub fn system_prompt_for_persona(
+    pub async fn system_prompt_for_persona(
         &self,
         user_id: Option<&str>,
         persona_name: &str,
@@ -184,6 +185,7 @@ impl ApiState {
         let all_skills = self
             .skill_repo
             .list_enabled_for_user(user_id)
+            .await
             .unwrap_or_default();
 
         // Apply agent-level skill filter

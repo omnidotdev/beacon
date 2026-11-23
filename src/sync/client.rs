@@ -132,7 +132,7 @@ impl SyncClient {
     /// Returns error if database query or API call fails
     pub async fn push_changes(&self, db: &DbPool) -> Result<usize> {
         let repo = MemoryRepo::new(db.clone());
-        let unsynced = repo.unsynced()?;
+        let unsynced = repo.unsynced().await?;
 
         if unsynced.is_empty() {
             tracing::debug!("no unsynced memories to push");
@@ -185,7 +185,7 @@ impl SyncClient {
 
         // Mark pushed memories as synced
         let ids: Vec<&str> = unsynced.iter().map(|m| m.id.as_str()).collect();
-        repo.mark_synced(&ids)?;
+        repo.mark_synced(&ids).await?;
 
         let total = result.pushed + result.merged;
         tracing::info!(
@@ -243,11 +243,11 @@ impl SyncClient {
                 let memory = remote_to_memory(remote, &self.device_id);
 
                 // Check if we already have this memory locally
-                if let Some(local) = repo.get_without_access_update(&memory.id)? {
+                if let Some(local) = repo.get_without_access_update(&memory.id).await? {
                     let merged = merge_memory(&local, &memory);
-                    repo.upsert_from_remote(&merged)?;
+                    repo.upsert_from_remote(&merged).await?;
                 } else {
-                    repo.upsert_from_remote(&memory)?;
+                    repo.upsert_from_remote(&memory).await?;
                 }
 
                 total_pulled += 1;

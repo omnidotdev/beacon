@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
+
 use super::DbPool;
+use crate::Result;
 use crate::skills::{InstalledSkill, Skill, SkillMetadata, SkillPriority, SkillSource};
-use crate::{Error, Result};
 
 /// Skill repository for CRUD operations on installed skills
 #[derive(Clone)]
@@ -28,7 +31,7 @@ impl SkillRepo {
     ///
     /// Returns error if database operation fails
     #[allow(clippy::too_many_lines)]
-    pub fn install_with_priority(
+    pub async fn install_with_priority(
         &self,
         skill: &Skill,
         priority: SkillPriority,
@@ -37,7 +40,7 @@ impl SkillRepo {
         // Generate command name before acquiring the INSERT connection to avoid
         // holding two pool connections simultaneously (deadlocks single-conn pools)
         let command_name = if skill.metadata.user_invocable {
-            let existing = self.list_command_names()?;
+            let existing = self.list_command_names().await?;
             Some(crate::skills::deduplicate_command_name(
                 &skill.metadata.name,
                 &existing,
@@ -45,11 +48,6 @@ impl SkillRepo {
         } else {
             None
         };
-
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
 
         let id = Uuid::new_v4().to_string();
         let tags_json = serde_json::to_string(&skill.metadata.tags).unwrap_or_default();
@@ -89,7 +87,7 @@ impl SkillRepo {
         let requires_config_json = serde_json::to_string(&skill.metadata.requires_config)
             .unwrap_or_else(|_| "[]".to_string());
 
-        conn.execute(
+        sqlx::query(
             r"
             INSERT INTO installed_skills (
                 id, name, description, version, author, tags, permissions,
@@ -100,41 +98,41 @@ impl SkillRepo {
                 command_dispatch_tool, api_key, skill_env,
                 install_specs, requires_config, location
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
-                ?20, ?21, ?22, ?23, ?24, NULL, '{}',
-                ?25, ?26, ?27
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, $13, $14, $15, $16, $17, $18, $19,
+                $20, $21, $22, $23, $24, NULL, '{}',
+                $25, $26, $27
             )
             ",
-            rusqlite::params![
-                id,
-                skill.metadata.name,
-                skill.metadata.description,
-                skill.metadata.version,
-                skill.metadata.author,
-                tags_json,
-                permissions_json,
-                skill.content,
-                source_type,
-                source_namespace,
-                source_repository,
-                priority.as_db(),
-                skill.metadata.always,
-                skill.metadata.user_invocable,
-                skill.metadata.disable_model_invocation,
-                skill.metadata.emoji,
-                requires_env_json,
-                command_name,
-                user_id,
-                os_json,
-                requires_bins_json,
-                requires_any_bins_json,
-                skill.metadata.primary_env,
-                command_dispatch_tool,
-                install_specs_json,
-                requires_config_json,
-                skill.location,
-            ],
-        )?;
+        )
+        .bind(id.clone())
+        .bind(skill.metadata.name.clone())
+        .bind(skill.metadata.description.clone())
+        .bind(skill.metadata.version.clone())
+        .bind(skill.metadata.author.clone())
+        .bind(tags_json)
+        .bind(permissions_json)
+        .bind(skill.content.clone())
+        .bind(source_type)
+        .bind(source_namespace.map(str::to_string))
+        .bind(source_repository.map(str::to_string))
+        .bind(priority.as_db())
+        .bind(i64::from(skill.metadata.always))
+        .bind(i64::from(skill.metadata.user_invocable))
+        .bind(i64::from(skill.metadata.disable_model_invocation))
+        .bind(skill.metadata.emoji.clone())
+        .bind(requires_env_json)
+        .bind(command_name.clone())
+        .bind(user_id.map(str::to_string))
+        .bind(os_json)
+        .bind(requires_bins_json)
+        .bind(requires_any_bins_json)
+        .bind(skill.metadata.primary_env.clone())
+        .bind(command_dispatch_tool.clone())
+        .bind(install_specs_json)
+        .bind(requires_config_json)
+        .bind(skill.location.clone())
+        .execute(self.pool.pool())
+        .await?;
 
         tracing::info!(skill_id = %id, name = %skill.metadata.name, priority = %priority.as_db(), "skill installed");
 
@@ -159,8 +157,9 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn install(&self, skill: &Skill) -> Result<InstalledSkill> {
+    pub async fn install(&self, skill: &Skill) -> Result<InstalledSkill> {
         self.install_with_priority(skill, SkillPriority::default(), None)
+            .await
     }
 
     /// Uninstall a skill by ID
@@ -168,16 +167,12 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn uninstall(&self, skill_id: &str) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let rows = conn.execute(
-            "DELETE FROM installed_skills WHERE id = ?1",
-            rusqlite::params![skill_id],
-        )?;
+    pub async fn uninstall(&self, skill_id: &str) -> Result<bool> {
+        let rows = sqlx::query("DELETE FROM installed_skills WHERE id = $1")
+            .bind(skill_id.to_string())
+            .execute(self.pool.pool())
+            .await?
+            .rows_affected();
 
         if rows > 0 {
             tracing::info!(skill_id = %skill_id, "skill uninstalled");
@@ -203,27 +198,9 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get(&self, skill_id: &str) -> Result<Option<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sql = format!(
-            "SELECT {} FROM installed_skills WHERE id = ?1",
-            Self::SELECT_COLS,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let result = stmt.query_row(rusqlite::params![skill_id], |row| {
-            Self::row_to_installed_skill(row)
-        });
-
-        match result {
-            Ok(skill) => Ok(Some(skill)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+    pub async fn get(&self, skill_id: &str) -> Result<Option<InstalledSkill>> {
+        self.fetch_one_where("id = $1", vec![skill_id.to_string()])
+            .await
     }
 
     /// Get an installed skill by name
@@ -231,27 +208,9 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_by_name(&self, name: &str) -> Result<Option<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sql = format!(
-            "SELECT {} FROM installed_skills WHERE name = ?1",
-            Self::SELECT_COLS,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let result = stmt.query_row(rusqlite::params![name], |row| {
-            Self::row_to_installed_skill(row)
-        });
-
-        match result {
-            Ok(skill) => Ok(Some(skill)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+    pub async fn get_by_name(&self, name: &str) -> Result<Option<InstalledSkill>> {
+        self.fetch_one_where("name = $1", vec![name.to_string()])
+            .await
     }
 
     /// Look up a skill by its slash command name, scoped to a user
@@ -259,31 +218,60 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_by_command_name(
+    pub async fn get_by_command_name(
         &self,
         command: &str,
         user_id: Option<&str>,
     ) -> Result<Option<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+        self.fetch_one_where(
+            "command_name = $1 AND (user_id IS NULL OR user_id = $2)",
+            vec![command.to_string(), user_id.unwrap_or("").to_string()],
+        )
+        .await
+    }
 
+    /// The first skill matching a `WHERE` clause over text binds
+    async fn fetch_one_where(
+        &self,
+        condition: &str,
+        binds: Vec<String>,
+    ) -> Result<Option<InstalledSkill>> {
         let sql = format!(
-            "SELECT {} FROM installed_skills WHERE command_name = ?1 AND (user_id IS NULL OR user_id = ?2)",
+            "SELECT {} FROM installed_skills WHERE {condition}",
             Self::SELECT_COLS,
         );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let result = stmt.query_row(rusqlite::params![command, user_id.unwrap_or("")], |row| {
-            Self::row_to_installed_skill(row)
-        });
-
-        match result {
-            Ok(skill) => Ok(Some(skill)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in binds {
+            query = query.bind(bind);
         }
+        query
+            .fetch_optional(self.pool.pool())
+            .await?
+            .as_ref()
+            .map(Self::row_to_installed_skill)
+            .transpose()
+    }
+
+    /// Every skill matching a `WHERE` clause over text binds, by name
+    async fn fetch_all_where(
+        &self,
+        condition: &str,
+        binds: Vec<String>,
+    ) -> Result<Vec<InstalledSkill>> {
+        let sql = format!(
+            "SELECT {} FROM installed_skills WHERE {condition} ORDER BY name",
+            Self::SELECT_COLS,
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        query
+            .fetch_all(self.pool.pool())
+            .await?
+            .iter()
+            .map(Self::row_to_installed_skill)
+            .collect()
     }
 
     /// List all installed skills (admin view, no user filtering)
@@ -291,26 +279,8 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list(&self) -> Result<Vec<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sql = format!(
-            "SELECT {} FROM installed_skills ORDER BY name",
-            Self::SELECT_COLS,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let rows = stmt.query_map([], Self::row_to_installed_skill)?;
-
-        let mut skills = Vec::new();
-        for row in rows {
-            skills.push(row?);
-        }
-
-        Ok(skills)
+    pub async fn list(&self) -> Result<Vec<InstalledSkill>> {
+        self.fetch_all_where("1 = 1", vec![]).await
     }
 
     /// List enabled skills only (admin view, no user filtering)
@@ -318,26 +288,8 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list_enabled(&self) -> Result<Vec<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sql = format!(
-            "SELECT {} FROM installed_skills WHERE enabled = 1 ORDER BY name",
-            Self::SELECT_COLS,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let rows = stmt.query_map([], Self::row_to_installed_skill)?;
-
-        let mut skills = Vec::new();
-        for row in rows {
-            skills.push(row?);
-        }
-
-        Ok(skills)
+    pub async fn list_enabled(&self) -> Result<Vec<InstalledSkill>> {
+        self.fetch_all_where("enabled = 1", vec![]).await
     }
 
     /// List enabled skills visible to a specific user (shared + user-specific)
@@ -345,48 +297,24 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list_enabled_for_user(&self, user_id: Option<&str>) -> Result<Vec<InstalledSkill>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let sql = format!(
-            "SELECT {} FROM installed_skills WHERE enabled = 1 AND (user_id IS NULL OR user_id = ?1) ORDER BY name",
-            Self::SELECT_COLS,
-        );
-        let mut stmt = conn.prepare(&sql)?;
-
-        let rows = stmt.query_map(
-            rusqlite::params![user_id.unwrap_or("")],
-            Self::row_to_installed_skill,
-        )?;
-
-        let mut skills = Vec::new();
-        for row in rows {
-            skills.push(row?);
-        }
-
-        Ok(skills)
+    pub async fn list_enabled_for_user(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<InstalledSkill>> {
+        self.fetch_all_where(
+            "enabled = 1 AND (user_id IS NULL OR user_id = $1)",
+            vec![user_id.unwrap_or("").to_string()],
+        )
+        .await
     }
 
     /// List all existing command names (for deduplication)
-    fn list_command_names(&self) -> Result<Vec<String>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let mut stmt = conn
-            .prepare("SELECT command_name FROM installed_skills WHERE command_name IS NOT NULL")?;
-
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-
-        let mut names = Vec::new();
-        for row in rows {
-            names.push(row?);
-        }
-        Ok(names)
+    async fn list_command_names(&self) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT command_name FROM installed_skills WHERE command_name IS NOT NULL",
+        )
+        .fetch_all(self.pool.pool())
+        .await?)
     }
 
     /// Upsert a bundled skill (INSERT OR REPLACE by name + bundled source)
@@ -396,16 +324,16 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn upsert_bundled(&self, skill: &Skill, priority: SkillPriority) -> Result<InstalledSkill> {
+    pub async fn upsert_bundled(
+        &self,
+        skill: &Skill,
+        priority: SkillPriority,
+    ) -> Result<InstalledSkill> {
         // Check if already installed
-        if let Some(existing) = self.get_by_name(&skill.metadata.name)?
+        if let Some(existing) = self.get_by_name(&skill.metadata.name).await?
             && existing.skill.source == SkillSource::Bundled
         {
             // Update content but preserve user settings
-            let conn = self
-                .pool
-                .get()
-                .map_err(|e| Error::Database(e.to_string()))?;
             let requires_env_json =
                 serde_json::to_string(&skill.metadata.requires_env).unwrap_or_default();
             let os_json = serde_json::to_string(&skill.metadata.os).unwrap_or_default();
@@ -424,38 +352,39 @@ impl SkillRepo {
             let requires_config_json = serde_json::to_string(&skill.metadata.requires_config)
                 .unwrap_or_else(|_| "[]".to_string());
 
-            conn.execute(
+            sqlx::query(
                 r"
                     UPDATE installed_skills
-                    SET content = ?1, description = ?2, always_include = ?3,
-                        user_invocable = ?4, disable_model_invocation = ?5,
-                        emoji = ?6, requires_env = ?7,
-                        os = ?8, requires_bins = ?9, requires_any_bins = ?10,
-                        primary_env = ?11, command_dispatch_tool = ?12,
-                        install_specs = ?13, requires_config = ?14,
-                        location = ?15,
-                        updated_at = datetime('now')
-                    WHERE id = ?16
+                    SET content = $1, description = $2, always_include = $3,
+                        user_invocable = $4, disable_model_invocation = $5,
+                        emoji = $6, requires_env = $7,
+                        os = $8, requires_bins = $9, requires_any_bins = $10,
+                        primary_env = $11, command_dispatch_tool = $12,
+                        install_specs = $13, requires_config = $14,
+                        location = $15,
+                        updated_at = $16
+                    WHERE id = $17
                     ",
-                rusqlite::params![
-                    skill.content,
-                    skill.metadata.description,
-                    skill.metadata.always,
-                    skill.metadata.user_invocable,
-                    skill.metadata.disable_model_invocation,
-                    skill.metadata.emoji,
-                    requires_env_json,
-                    os_json,
-                    requires_bins_json,
-                    requires_any_bins_json,
-                    skill.metadata.primary_env,
-                    command_dispatch_tool,
-                    install_specs_json,
-                    requires_config_json,
-                    skill.location,
-                    existing.skill.id,
-                ],
-            )?;
+            )
+            .bind(skill.content.clone())
+            .bind(skill.metadata.description.clone())
+            .bind(i64::from(skill.metadata.always))
+            .bind(i64::from(skill.metadata.user_invocable))
+            .bind(i64::from(skill.metadata.disable_model_invocation))
+            .bind(skill.metadata.emoji.clone())
+            .bind(requires_env_json)
+            .bind(os_json)
+            .bind(requires_bins_json)
+            .bind(requires_any_bins_json)
+            .bind(skill.metadata.primary_env.clone())
+            .bind(command_dispatch_tool.clone())
+            .bind(install_specs_json)
+            .bind(requires_config_json)
+            .bind(skill.location.clone())
+            .bind(super::now())
+            .bind(existing.skill.id.clone())
+            .execute(self.pool.pool())
+            .await?;
 
             tracing::debug!(name = %skill.metadata.name, "updated bundled skill content");
 
@@ -483,6 +412,7 @@ impl SkillRepo {
         let mut bundled_skill = skill.clone();
         bundled_skill.source = SkillSource::Bundled;
         self.install_with_priority(&bundled_skill, priority, None)
+            .await
     }
 
     /// Enable or disable a skill
@@ -490,20 +420,20 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn set_enabled(&self, skill_id: &str, enabled: bool) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let rows = conn.execute(
+    pub async fn set_enabled(&self, skill_id: &str, enabled: bool) -> Result<bool> {
+        let rows = sqlx::query(
             r"
             UPDATE installed_skills
-            SET enabled = ?1, updated_at = datetime('now')
-            WHERE id = ?2
+            SET enabled = $1, updated_at = $2
+            WHERE id = $3
             ",
-            rusqlite::params![enabled, skill_id],
-        )?;
+        )
+        .bind(i64::from(enabled))
+        .bind(super::now())
+        .bind(skill_id.to_string())
+        .execute(self.pool.pool())
+        .await?
+        .rows_affected();
 
         if rows > 0 {
             tracing::info!(skill_id = %skill_id, enabled = %enabled, "skill enabled state changed");
@@ -517,20 +447,20 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn set_priority(&self, skill_id: &str, priority: SkillPriority) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let rows = conn.execute(
+    pub async fn set_priority(&self, skill_id: &str, priority: SkillPriority) -> Result<bool> {
+        let rows = sqlx::query(
             r"
             UPDATE installed_skills
-            SET priority = ?1, updated_at = datetime('now')
-            WHERE id = ?2
+            SET priority = $1, updated_at = $2
+            WHERE id = $3
             ",
-            rusqlite::params![priority.as_db(), skill_id],
-        )?;
+        )
+        .bind(priority.as_db())
+        .bind(super::now())
+        .bind(skill_id.to_string())
+        .execute(self.pool.pool())
+        .await?
+        .rows_affected();
 
         if rows > 0 {
             tracing::info!(skill_id = %skill_id, priority = %priority.as_db(), "skill priority changed");
@@ -544,47 +474,42 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn update_skill_config(
+    pub async fn update_skill_config(
         &self,
         skill_id: &str,
         api_key: Option<&str>,
         env: Option<&HashMap<String, String>>,
     ) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
         let mut updates = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut idx = 1;
+        let mut binds: Vec<String> = Vec::new();
 
         if let Some(key) = api_key {
-            updates.push(format!("api_key = ?{idx}"));
-            params.push(Box::new(key.to_string()));
-            idx += 1;
+            binds.push(key.to_string());
+            updates.push(format!("api_key = ${}", binds.len()));
         }
         if let Some(env_map) = env {
-            let env_json = serde_json::to_string(env_map).unwrap_or_else(|_| "{}".to_string());
-            updates.push(format!("skill_env = ?{idx}"));
-            params.push(Box::new(env_json));
-            idx += 1;
+            binds.push(serde_json::to_string(env_map).unwrap_or_else(|_| "{}".to_string()));
+            updates.push(format!("skill_env = ${}", binds.len()));
         }
 
         if updates.is_empty() {
             return Ok(false);
         }
 
-        updates.push("updated_at = datetime('now')".to_string());
+        binds.push(super::now());
+        updates.push(format!("updated_at = ${}", binds.len()));
+        binds.push(skill_id.to_string());
         let sql = format!(
-            "UPDATE installed_skills SET {} WHERE id = ?{idx}",
-            updates.join(", ")
+            "UPDATE installed_skills SET {} WHERE id = ${}",
+            updates.join(", "),
+            binds.len()
         );
-        params.push(Box::new(skill_id.to_string()));
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(AsRef::as_ref).collect();
-        let rows = conn.execute(&sql, param_refs.as_slice())?;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        let rows = query.execute(self.pool.pool()).await?.rows_affected();
 
         if rows > 0 {
             tracing::info!(skill_id = %skill_id, "skill config updated");
@@ -595,48 +520,49 @@ impl SkillRepo {
 
     /// Convert a database row to an `InstalledSkill`
     #[allow(clippy::too_many_lines)]
-    fn row_to_installed_skill(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledSkill> {
-        let id: String = row.get(0)?;
-        let name: String = row.get(1)?;
-        let description: String = row.get(2)?;
-        let version: Option<String> = row.get(3)?;
-        let author: Option<String> = row.get(4)?;
-        let tags_json: String = row.get(5)?;
-        let permissions_json: String = row.get(6)?;
-        let content: String = row.get(7)?;
-        let source_type: String = row.get(8)?;
-        let source_namespace: Option<String> = row.get(9)?;
-        let source_repository: Option<String> = row.get(10)?;
-        let enabled: bool = row.get(11)?;
-        let installed_at: String = row.get(12)?;
+    fn row_to_installed_skill(row: &AnyRow) -> Result<InstalledSkill> {
+        let id: String = row.try_get(0)?;
+        let name: String = row.try_get(1)?;
+        let description: String = row.try_get(2)?;
+        let version: Option<String> = row.try_get(3)?;
+        let author: Option<String> = row.try_get(4)?;
+        let tags_json: String = row.try_get(5)?;
+        let permissions_json: String = row.try_get(6)?;
+        let content: String = row.try_get(7)?;
+        let source_type: String = row.try_get(8)?;
+        let source_namespace: Option<String> = row.try_get(9)?;
+        let source_repository: Option<String> = row.try_get(10)?;
+        let enabled = row.try_get::<i64, _>(11)? != 0;
+        let installed_at: String = row.try_get(12)?;
         let priority_str: String = row
-            .get::<_, Option<String>>(13)?
+            .try_get::<Option<String>, _>(13)?
             .unwrap_or_else(|| "standard".to_string());
-        let always: bool = row.get::<_, Option<bool>>(14)?.unwrap_or(false);
-        let user_invocable: bool = row.get::<_, Option<bool>>(15)?.unwrap_or(true);
-        let disable_model_invocation: bool = row.get::<_, Option<bool>>(16)?.unwrap_or(false);
-        let emoji: Option<String> = row.get(17)?;
+        let always: bool = row.try_get::<Option<i64>, _>(14)?.is_some_and(|v| v != 0);
+        let user_invocable: bool = row.try_get::<Option<i64>, _>(15)?.is_none_or(|v| v != 0);
+        let disable_model_invocation: bool =
+            row.try_get::<Option<i64>, _>(16)?.is_some_and(|v| v != 0);
+        let emoji: Option<String> = row.try_get(17)?;
         let requires_env_json: String = row
-            .get::<_, Option<String>>(18)?
+            .try_get::<Option<String>, _>(18)?
             .unwrap_or_else(|| "[]".to_string());
-        let command_name: Option<String> = row.get(19)?;
-        let user_id: Option<String> = row.get(20)?;
+        let command_name: Option<String> = row.try_get(19)?;
+        let user_id: Option<String> = row.try_get(20)?;
 
         // v14 columns (safe defaults for pre-migration DBs)
         let os_json: String = row
-            .get::<_, Option<String>>(21)?
+            .try_get::<Option<String>, _>(21)?
             .unwrap_or_else(|| "[]".to_string());
         let requires_bins_json: String = row
-            .get::<_, Option<String>>(22)?
+            .try_get::<Option<String>, _>(22)?
             .unwrap_or_else(|| "[]".to_string());
         let requires_any_bins_json: String = row
-            .get::<_, Option<String>>(23)?
+            .try_get::<Option<String>, _>(23)?
             .unwrap_or_else(|| "[]".to_string());
-        let primary_env: Option<String> = row.get(24)?;
-        let command_dispatch_tool: Option<String> = row.get(25)?;
-        let api_key: Option<String> = row.get(26)?;
+        let primary_env: Option<String> = row.try_get(24)?;
+        let command_dispatch_tool: Option<String> = row.try_get(25)?;
+        let api_key: Option<String> = row.try_get(26)?;
         let skill_env_json: String = row
-            .get::<_, Option<String>>(27)?
+            .try_get::<Option<String>, _>(27)?
             .unwrap_or_else(|| "{}".to_string());
 
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -650,13 +576,13 @@ impl SkillRepo {
             serde_json::from_str(&requires_any_bins_json).unwrap_or_default();
         // v15/v16 columns
         let install_specs_json: String = row
-            .get::<_, Option<String>>(28)?
+            .try_get::<Option<String>, _>(28)?
             .unwrap_or_else(|| "[]".to_string());
         let requires_config_json: String = row
-            .get::<_, Option<String>>(29)?
+            .try_get::<Option<String>, _>(29)?
             .unwrap_or_else(|| "[]".to_string());
         // v18 column
-        let location: Option<String> = row.get(30).unwrap_or(None);
+        let location: Option<String> = row.try_get(30).unwrap_or(None);
 
         let skill_env: HashMap<String, String> =
             serde_json::from_str(&skill_env_json).unwrap_or_default();
@@ -753,65 +679,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_install_and_get() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_install_and_get() {
+        let pool = init_memory().await.unwrap();
         let repo = SkillRepo::new(pool);
 
         let skill = test_skill();
-        let installed = repo.install(&skill).unwrap();
+        let installed = repo.install(&skill).await.unwrap();
 
         assert_eq!(installed.skill.metadata.name, "test-skill");
         assert!(installed.enabled);
 
-        let fetched = repo.get_by_name("test-skill").unwrap().unwrap();
+        let fetched = repo.get_by_name("test-skill").await.unwrap().unwrap();
         assert_eq!(fetched.skill.metadata.name, "test-skill");
     }
 
-    #[test]
-    fn test_list_and_uninstall() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_list_and_uninstall() {
+        let pool = init_memory().await.unwrap();
         let repo = SkillRepo::new(pool);
 
         let skill = test_skill();
-        let installed = repo.install(&skill).unwrap();
+        let installed = repo.install(&skill).await.unwrap();
 
-        let list = repo.list().unwrap();
+        let list = repo.list().await.unwrap();
         assert_eq!(list.len(), 1);
 
-        let removed = repo.uninstall(&installed.skill.id).unwrap();
+        let removed = repo.uninstall(&installed.skill.id).await.unwrap();
         assert!(removed);
 
-        let list = repo.list().unwrap();
+        let list = repo.list().await.unwrap();
         assert!(list.is_empty());
     }
 
-    #[test]
-    fn test_enable_disable() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_enable_disable() {
+        let pool = init_memory().await.unwrap();
         let repo = SkillRepo::new(pool);
 
         let skill = test_skill();
-        let installed = repo.install(&skill).unwrap();
+        let installed = repo.install(&skill).await.unwrap();
 
         // Disable
-        repo.set_enabled(&installed.skill.id, false).unwrap();
-        let fetched = repo.get(&installed.skill.id).unwrap().unwrap();
+        repo.set_enabled(&installed.skill.id, false).await.unwrap();
+        let fetched = repo.get(&installed.skill.id).await.unwrap().unwrap();
         assert!(!fetched.enabled);
 
         // List enabled should be empty
-        let enabled = repo.list_enabled().unwrap();
+        let enabled = repo.list_enabled().await.unwrap();
         assert!(enabled.is_empty());
 
         // Re-enable
-        repo.set_enabled(&installed.skill.id, true).unwrap();
-        let enabled = repo.list_enabled().unwrap();
+        repo.set_enabled(&installed.skill.id, true).await.unwrap();
+        let enabled = repo.list_enabled().await.unwrap();
         assert_eq!(enabled.len(), 1);
     }
 
-    #[test]
-    fn test_install_specs_db_roundtrip() {
-        let pool = init_memory().unwrap();
+    #[tokio::test]
+    async fn test_install_specs_db_roundtrip() {
+        let pool = init_memory().await.unwrap();
         let repo = SkillRepo::new(pool);
 
         let mut skill = test_skill();
@@ -830,8 +756,8 @@ mod tests {
         }];
         skill.metadata.requires_config = vec!["voice.enabled".to_string()];
 
-        let installed = repo.install(&skill).unwrap();
-        let fetched = repo.get(&installed.skill.id).unwrap().unwrap();
+        let installed = repo.install(&skill).await.unwrap();
+        let fetched = repo.get(&installed.skill.id).await.unwrap().unwrap();
 
         assert_eq!(fetched.skill.metadata.install.len(), 1);
         assert_eq!(

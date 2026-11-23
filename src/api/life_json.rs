@@ -221,6 +221,7 @@ async fn export_memories(
         &persona_id,
         query.limit,
     )
+    .await
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -256,6 +257,7 @@ async fn import_memories(
         &content_str,
         req.persona_id.as_deref(),
     )
+    .await
     .map_err(|e| {
         let (status, code) = if e.to_string().contains("parse") || e.to_string().contains("JSON") {
             (StatusCode::BAD_REQUEST, "parse_error")
@@ -286,6 +288,7 @@ async fn crud_list_memories(
     let memories = state
         .memory_repo
         .list(&query.user_id, category)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -313,6 +316,7 @@ async fn search_memories(
     let memories = state
         .memory_repo
         .search(&query.user_id, &query.q)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -344,7 +348,7 @@ async fn create_memory(
         memory = memory.with_tag(tag);
     }
 
-    state.memory_repo.add(&memory).map_err(|e| {
+    state.memory_repo.add(&memory).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -359,7 +363,7 @@ async fn delete_memory(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let deleted = state.memory_repo.delete(&id).map_err(|e| {
+    let deleted = state.memory_repo.delete(&id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             error_response("db_error", &e.to_string()),
@@ -398,14 +402,14 @@ mod tests {
     use super::*;
     use crate::db::{self, MemoryCategory, MemoryRepo};
 
-    #[test]
-    fn list_handler_filters_by_user() {
-        let pool = db::init_memory().unwrap();
+    #[tokio::test]
+    async fn list_handler_filters_by_user() {
+        let pool = db::init_memory().await.unwrap();
         let repo = MemoryRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool);
 
-        let alice = user_repo.find_or_create("alice_lhfbu").unwrap();
-        let bob = user_repo.find_or_create("bob_lhfbu").unwrap();
+        let alice = user_repo.find_or_create("alice_lhfbu").await.unwrap();
+        let bob = user_repo.find_or_create("bob_lhfbu").await.unwrap();
 
         let m1 = crate::db::Memory::new(
             alice.id.clone(),
@@ -414,36 +418,36 @@ mod tests {
         );
         let m2 =
             crate::db::Memory::new(bob.id.clone(), MemoryCategory::Fact, "Bob fact".to_string());
-        repo.add(&m1).unwrap();
-        repo.add(&m2).unwrap();
+        repo.add(&m1).await.unwrap();
+        repo.add(&m2).await.unwrap();
 
-        let alice_memories = repo.list(&alice.id, None).unwrap();
-        let bob_memories = repo.list(&bob.id, None).unwrap();
+        let alice_memories = repo.list(&alice.id, None).await.unwrap();
+        let bob_memories = repo.list(&bob.id, None).await.unwrap();
         assert_eq!(alice_memories.len(), 1);
         assert_eq!(bob_memories.len(), 1);
         assert!(alice_memories[0].content.contains("Alice"));
         assert!(bob_memories[0].content.contains("Bob"));
     }
 
-    #[test]
-    fn delete_handler_soft_deletes() {
-        let pool = db::init_memory().unwrap();
+    #[tokio::test]
+    async fn delete_handler_soft_deletes() {
+        let pool = db::init_memory().await.unwrap();
         let repo = MemoryRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool);
 
-        let user = user_repo.find_or_create("user_dhsd_delete").unwrap();
+        let user = user_repo.find_or_create("user_dhsd_delete").await.unwrap();
         let m = crate::db::Memory::new(
             user.id.clone(),
             MemoryCategory::General,
             "to delete".to_string(),
         );
-        repo.add(&m).unwrap();
+        repo.add(&m).await.unwrap();
 
-        let deleted = repo.delete(&m.id).unwrap();
+        let deleted = repo.delete(&m.id).await.unwrap();
         assert!(deleted);
 
         // Should not appear in list after soft-delete
-        let memories = repo.list(&user.id, None).unwrap();
+        let memories = repo.list(&user.id, None).await.unwrap();
         assert!(memories.is_empty());
     }
 

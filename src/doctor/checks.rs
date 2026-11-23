@@ -75,8 +75,7 @@ pub async fn synapse_connectivity(config: &Config) -> CheckResult {
 }
 
 /// Check `SQLite` database integrity
-#[must_use]
-pub fn sqlite_health(config: &Config) -> CheckResult {
+pub async fn sqlite_health(config: &Config) -> CheckResult {
     let db_path = config.data_dir.join("beacon.db");
 
     if !db_path.exists() {
@@ -88,35 +87,23 @@ pub fn sqlite_health(config: &Config) -> CheckResult {
         };
     }
 
-    match rusqlite::Connection::open(&db_path) {
-        Ok(conn) => {
-            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
-                Ok(ref result) if result == "ok" => CheckResult {
-                    name: "SqliteHealth",
-                    status: CheckStatus::Ok,
-                    message: format!("database at {} is healthy", db_path.display()),
-                    suggestion: None,
-                },
-                Ok(result) => CheckResult {
-                    name: "SqliteHealth",
-                    status: CheckStatus::Error,
-                    message: format!("integrity check failed: {result}"),
-                    suggestion: Some(
-                        "consider running `beacon backup create` then restoring".to_string(),
-                    ),
-                },
-                Err(e) => CheckResult {
-                    name: "SqliteHealth",
-                    status: CheckStatus::Error,
-                    message: format!("integrity check error: {e}"),
-                    suggestion: None,
-                },
-            }
-        }
+    match crate::db::sqlite_integrity_check(&db_path).await {
+        Ok(ref result) if result == "ok" => CheckResult {
+            name: "SqliteHealth",
+            status: CheckStatus::Ok,
+            message: format!("database at {} is healthy", db_path.display()),
+            suggestion: None,
+        },
+        Ok(result) => CheckResult {
+            name: "SqliteHealth",
+            status: CheckStatus::Error,
+            message: format!("integrity check failed: {result}"),
+            suggestion: Some("consider running `beacon backup create` then restoring".to_string()),
+        },
         Err(e) => CheckResult {
             name: "SqliteHealth",
             status: CheckStatus::Error,
-            message: format!("cannot open database: {e}"),
+            message: format!("integrity check error: {e}"),
             suggestion: None,
         },
     }

@@ -3,8 +3,11 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
+
 use super::DbPool;
-use crate::{Error, Result};
+use crate::Result;
 
 /// A user
 #[derive(Debug, Clone)]
@@ -33,6 +36,19 @@ pub struct UserRepo {
     pool: DbPool,
 }
 
+const USER_COLUMNS: &str = "id, life_json_path, created_at, updated_at";
+
+impl User {
+    fn from_row(row: &AnyRow) -> Result<Self> {
+        Ok(Self {
+            id: row.try_get(0)?,
+            life_json_path: row.try_get(1)?,
+            created_at: parse_datetime(&row.try_get::<String, _>(2)?),
+            updated_at: parse_datetime(&row.try_get::<String, _>(3)?),
+        })
+    }
+}
+
 impl UserRepo {
     /// Create a new user repository
     #[must_use]
@@ -43,50 +59,27 @@ impl UserRepo {
 
     /// Find or create a user
     ///
+    /// Inserts only when absent, so concurrent first requests for the same
+    /// user cannot race into a duplicate key error
+    ///
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn find_or_create(&self, id: &str) -> Result<User> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        // Try to find existing user
-        let existing: Option<User> = conn
-            .query_row(
-                "SELECT id, life_json_path, created_at, updated_at FROM users WHERE id = ?1",
-                [id],
-                |row| {
-                    Ok(User {
-                        id: row.get(0)?,
-                        life_json_path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?),
-                        updated_at: parse_datetime(&row.get::<_, String>(3)?),
-                    })
-                },
-            )
-            .ok();
-
-        if let Some(user) = existing {
-            return Ok(user);
-        }
-
-        // Create new user
+    pub async fn find_or_create(&self, id: &str) -> Result<User> {
         let now = Utc::now().to_rfc3339();
 
-        conn.execute(
-            "INSERT INTO users (id, created_at, updated_at) VALUES (?1, ?2, ?2)",
-            [id, &now],
+        sqlx::query(
+            "INSERT INTO users (id, created_at, updated_at) VALUES ($1, $2, $2)
+             ON CONFLICT (id) DO NOTHING",
         )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        .bind(id.to_string())
+        .bind(now)
+        .execute(self.pool.pool())
+        .await?;
 
-        Ok(User {
-            id: id.to_string(),
-            life_json_path: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
+        self.find(id)
+            .await?
+            .ok_or_else(|| crate::Error::Database(format!("user {id} missing after insert")))
     }
 
     /// Find a user by ID (returns None if not found)
@@ -94,28 +87,16 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn find(&self, id: &str) -> Result<Option<User>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let user = conn
-            .query_row(
-                "SELECT id, life_json_path, created_at, updated_at FROM users WHERE id = ?1",
-                [id],
-                |row| {
-                    Ok(User {
-                        id: row.get(0)?,
-                        life_json_path: row.get(1)?,
-                        created_at: parse_datetime(&row.get::<_, String>(2)?),
-                        updated_at: parse_datetime(&row.get::<_, String>(3)?),
-                    })
-                },
-            )
-            .ok();
-
-        Ok(user)
+    pub async fn find(&self, id: &str) -> Result<Option<User>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {USER_COLUMNS} FROM users WHERE id = $1"
+        )))
+        .bind(id.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?
+        .as_ref()
+        .map(User::from_row)
+        .transpose()
     }
 
     /// List all users
@@ -123,46 +104,46 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list_all(&self) -> Result<Vec<User>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn list_all(&self) -> Result<Vec<User>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {USER_COLUMNS} FROM users ORDER BY created_at DESC"
+        )))
+        .fetch_all(self.pool.pool())
+        .await?;
 
-        let mut stmt = conn
-            .prepare("SELECT id, life_json_path, created_at, updated_at FROM users ORDER BY created_at DESC")
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let users = stmt
-            .query_map([], |row| {
-                Ok(User {
-                    id: row.get(0)?,
-                    life_json_path: row.get(1)?,
-                    created_at: parse_datetime(&row.get::<_, String>(2)?),
-                    updated_at: parse_datetime(&row.get::<_, String>(3)?),
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        Ok(users)
+        Ok(rows
+            .iter()
+            .filter_map(|row| User::from_row(row).ok())
+            .collect())
     }
 
-    /// Delete a user
+    /// Delete a user and everything stored for them
+    ///
+    /// Removes their messages, sessions, memories (and memory vectors), and
+    /// learned context first, in one transaction, so no row is left pointing at
+    /// a user that no longer exists
     ///
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn delete(&self, id: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        let mut tx = self.pool.pool().begin().await?;
 
-        conn.execute("DELETE FROM users WHERE id = ?1", [id])
-            .map_err(|e| Error::Database(e.to_string()))?;
+        for statement in [
+            "DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)",
+            "DELETE FROM sessions WHERE user_id = $1",
+            "DELETE FROM memories_vec WHERE memory_id IN (SELECT id FROM memories WHERE user_id = $1)",
+            "DELETE FROM memories WHERE user_id = $1",
+            "DELETE FROM user_context WHERE user_id = $1",
+            "DELETE FROM users WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -171,18 +152,13 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn set_life_json_path(&self, user_id: &str, path: Option<&str>) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-        let now = Utc::now().to_rfc3339();
-
-        conn.execute(
-            "UPDATE users SET life_json_path = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![path, now, user_id],
-        )
-        .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn set_life_json_path(&self, user_id: &str, path: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE users SET life_json_path = $1, updated_at = $2 WHERE id = $3")
+            .bind(path.map(str::to_string))
+            .bind(Utc::now().to_rfc3339())
+            .bind(user_id.to_string())
+            .execute(self.pool.pool())
+            .await?;
 
         Ok(())
     }
@@ -192,36 +168,29 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_context(&self, user_id: &str) -> Result<Vec<UserContext>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn get_context(&self, user_id: &str) -> Result<Vec<UserContext>> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, key, value, source, created_at, updated_at
+             FROM user_context WHERE user_id = $1 ORDER BY key",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(self.pool.pool())
+        .await?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, user_id, key, value, source, created_at, updated_at
-                 FROM user_context WHERE user_id = ?1 ORDER BY key",
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let contexts = stmt
-            .query_map([user_id], |row| {
-                Ok(UserContext {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    key: row.get(2)?,
-                    value: row.get(3)?,
-                    source: row.get(4)?,
-                    created_at: parse_datetime(&row.get::<_, String>(5)?),
-                    updated_at: parse_datetime(&row.get::<_, String>(6)?),
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some(UserContext {
+                    id: row.try_get(0).ok()?,
+                    user_id: row.try_get(1).ok()?,
+                    key: row.try_get(2).ok()?,
+                    value: row.try_get(3).ok()?,
+                    source: row.try_get(4).ok()?,
+                    created_at: parse_datetime(&row.try_get::<String, _>(5).ok()?),
+                    updated_at: parse_datetime(&row.try_get::<String, _>(6).ok()?),
                 })
             })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        Ok(contexts)
+            .collect())
     }
 
     /// Set a user context value
@@ -229,22 +198,29 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn set_context(&self, user_id: &str, key: &str, value: &str, source: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-
-        conn.execute(
+    pub async fn set_context(
+        &self,
+        user_id: &str,
+        key: &str,
+        value: &str,
+        source: &str,
+    ) -> Result<()> {
+        sqlx::query(
             "INSERT INTO user_context (id, user_id, key, value, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(user_id, key) DO UPDATE SET value = ?4, source = ?5, updated_at = ?6",
-            [&id, user_id, key, value, source, &now],
+             VALUES ($1, $2, $3, $4, $5, $6, $6)
+             ON CONFLICT (user_id, key) DO UPDATE SET
+                value = excluded.value,
+                source = excluded.source,
+                updated_at = excluded.updated_at",
         )
-        .map_err(|e| Error::Database(e.to_string()))?;
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id.to_string())
+        .bind(key.to_string())
+        .bind(value.to_string())
+        .bind(source.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .execute(self.pool.pool())
+        .await?;
 
         Ok(())
     }
@@ -254,21 +230,14 @@ impl UserRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_context_value(&self, user_id: &str, key: &str) -> Result<Option<String>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM user_context WHERE user_id = ?1 AND key = ?2",
-                [user_id, key],
-                |row| row.get(0),
-            )
-            .ok();
-
-        Ok(value)
+    pub async fn get_context_value(&self, user_id: &str, key: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM user_context WHERE user_id = $1 AND key = $2")
+                .bind(user_id.to_string())
+                .bind(key.to_string())
+                .fetch_optional(self.pool.pool())
+                .await?,
+        )
     }
 }
 
@@ -281,60 +250,64 @@ mod tests {
     use super::*;
     use crate::db::init_memory;
 
-    fn setup() -> UserRepo {
-        let pool = init_memory().unwrap();
+    async fn setup() -> UserRepo {
+        let pool = init_memory().await.unwrap();
         UserRepo::new(pool)
     }
 
-    #[test]
-    fn test_find_or_create_user() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_find_or_create_user() {
+        let repo = setup().await;
 
-        let user = repo.find_or_create("user-123").unwrap();
+        let user = repo.find_or_create("user-123").await.unwrap();
         assert_eq!(user.id, "user-123");
         assert!(user.life_json_path.is_none());
 
         // Should return same user
-        let user2 = repo.find_or_create("user-123").unwrap();
+        let user2 = repo.find_or_create("user-123").await.unwrap();
         assert_eq!(user.id, user2.id);
     }
 
-    #[test]
-    fn test_set_life_json_path() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_set_life_json_path() {
+        let repo = setup().await;
 
-        let user = repo.find_or_create("user-456").unwrap();
+        let user = repo.find_or_create("user-456").await.unwrap();
         repo.set_life_json_path(&user.id, Some("/home/user/life.json"))
+            .await
             .unwrap();
 
-        let user = repo.find_or_create("user-456").unwrap();
+        let user = repo.find_or_create("user-456").await.unwrap();
         assert_eq!(user.life_json_path.as_deref(), Some("/home/user/life.json"));
     }
 
-    #[test]
-    fn test_user_context() {
-        let repo = setup();
+    #[tokio::test]
+    async fn test_user_context() {
+        let repo = setup().await;
 
-        let user = repo.find_or_create("user-789").unwrap();
+        let user = repo.find_or_create("user-789").await.unwrap();
 
         // Set context
         repo.set_context(&user.id, "timezone", "America/Los_Angeles", "learned")
+            .await
             .unwrap();
         repo.set_context(&user.id, "name", "Brian", "life.json")
+            .await
             .unwrap();
 
         // Get all context
-        let contexts = repo.get_context(&user.id).unwrap();
+        let contexts = repo.get_context(&user.id).await.unwrap();
         assert_eq!(contexts.len(), 2);
 
         // Get specific value
-        let tz = repo.get_context_value(&user.id, "timezone").unwrap();
+        let tz = repo.get_context_value(&user.id, "timezone").await.unwrap();
         assert_eq!(tz, Some("America/Los_Angeles".to_string()));
 
         // Update existing context
         repo.set_context(&user.id, "timezone", "America/New_York", "learned")
+            .await
             .unwrap();
-        let tz = repo.get_context_value(&user.id, "timezone").unwrap();
+        let tz = repo.get_context_value(&user.id, "timezone").await.unwrap();
         assert_eq!(tz, Some("America/New_York".to_string()));
     }
 }

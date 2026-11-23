@@ -21,26 +21,21 @@ impl HarnessSessionRepo {
     /// # Errors
     ///
     /// Returns error if database query fails
-    pub fn get_session_id(
+    pub async fn get_session_id(
         &self,
         agent_id: &str,
         channel: &str,
         channel_id: &str,
     ) -> Result<Option<String>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        let mut stmt = conn.prepare_cached(
+        Ok(sqlx::query_scalar(
             "SELECT harness_session_id FROM harness_sessions
-             WHERE agent_id = ?1 AND channel = ?2 AND channel_id = ?3",
-        )?;
-        let result = stmt
-            .query_row(rusqlite::params![agent_id, channel, channel_id], |row| {
-                row.get(0)
-            })
-            .ok();
-        Ok(result)
+             WHERE agent_id = $1 AND channel = $2 AND channel_id = $3",
+        )
+        .bind(agent_id.to_string())
+        .bind(channel.to_string())
+        .bind(channel_id.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?)
     }
 
     /// Store or update the session ID for an agent+channel combo
@@ -48,7 +43,7 @@ impl HarnessSessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn upsert_session_id(
+    pub async fn upsert_session_id(
         &self,
         agent_id: &str,
         channel: &str,
@@ -56,24 +51,22 @@ impl HarnessSessionRepo {
         harness_session_id: &str,
         adapter: &str,
     ) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        conn.execute(
+        sqlx::query(
             "INSERT INTO harness_sessions (id, agent_id, channel, channel_id, harness_session_id, adapter)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(agent_id, channel, channel_id)
-             DO UPDATE SET harness_session_id = ?5, adapter = ?6, updated_at = datetime('now')",
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                agent_id,
-                channel,
-                channel_id,
-                harness_session_id,
-                adapter,
-            ],
-        )?;
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (agent_id, channel, channel_id)
+             DO UPDATE SET harness_session_id = excluded.harness_session_id,
+                adapter = excluded.adapter, updated_at = $7",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(agent_id.to_string())
+        .bind(channel.to_string())
+        .bind(channel_id.to_string())
+        .bind(harness_session_id.to_string())
+        .bind(adapter.to_string())
+        .bind(crate::db::now())
+        .execute(self.pool.pool())
+        .await?;
         Ok(())
     }
 
@@ -82,15 +75,20 @@ impl HarnessSessionRepo {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn delete_session(&self, agent_id: &str, channel: &str, channel_id: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| crate::Error::Database(e.to_string()))?;
-        conn.execute(
-            "DELETE FROM harness_sessions WHERE agent_id = ?1 AND channel = ?2 AND channel_id = ?3",
-            rusqlite::params![agent_id, channel, channel_id],
-        )?;
+    pub async fn delete_session(
+        &self,
+        agent_id: &str,
+        channel: &str,
+        channel_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM harness_sessions WHERE agent_id = $1 AND channel = $2 AND channel_id = $3",
+        )
+        .bind(agent_id.to_string())
+        .bind(channel.to_string())
+        .bind(channel_id.to_string())
+        .execute(self.pool.pool())
+        .await?;
         Ok(())
     }
 }
@@ -99,50 +97,64 @@ impl HarnessSessionRepo {
 mod tests {
     use super::*;
 
-    fn test_pool() -> DbPool {
-        crate::db::init_memory().unwrap()
+    async fn test_pool() -> DbPool {
+        crate::db::init_memory().await.unwrap()
     }
 
-    #[test]
-    fn get_returns_none_when_empty() {
-        let repo = HarnessSessionRepo::new(test_pool());
-        let result = repo.get_session_id("agent1", "discord", "chan1").unwrap();
+    #[tokio::test]
+    async fn get_returns_none_when_empty() {
+        let repo = HarnessSessionRepo::new(test_pool().await);
+        let result = repo
+            .get_session_id("agent1", "discord", "chan1")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn upsert_and_get_roundtrip() {
-        let repo = HarnessSessionRepo::new(test_pool());
+    #[tokio::test]
+    async fn upsert_and_get_roundtrip() {
+        let repo = HarnessSessionRepo::new(test_pool().await);
         repo.upsert_session_id("agent1", "discord", "chan1", "sess_abc", "claude_cli")
+            .await
             .unwrap();
         let result = repo
             .get_session_id("agent1", "discord", "chan1")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(result, "sess_abc");
     }
 
-    #[test]
-    fn upsert_overwrites_existing() {
-        let repo = HarnessSessionRepo::new(test_pool());
+    #[tokio::test]
+    async fn upsert_overwrites_existing() {
+        let repo = HarnessSessionRepo::new(test_pool().await);
         repo.upsert_session_id("agent1", "discord", "chan1", "sess_old", "claude_cli")
+            .await
             .unwrap();
         repo.upsert_session_id("agent1", "discord", "chan1", "sess_new", "claude_cli")
+            .await
             .unwrap();
         let result = repo
             .get_session_id("agent1", "discord", "chan1")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(result, "sess_new");
     }
 
-    #[test]
-    fn delete_removes_session() {
-        let repo = HarnessSessionRepo::new(test_pool());
+    #[tokio::test]
+    async fn delete_removes_session() {
+        let repo = HarnessSessionRepo::new(test_pool().await);
         repo.upsert_session_id("agent1", "discord", "chan1", "sess_abc", "claude_cli")
+            .await
             .unwrap();
-        repo.delete_session("agent1", "discord", "chan1").unwrap();
-        let result = repo.get_session_id("agent1", "discord", "chan1").unwrap();
+        repo.delete_session("agent1", "discord", "chan1")
+            .await
+            .unwrap();
+        let result = repo
+            .get_session_id("agent1", "discord", "chan1")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 }

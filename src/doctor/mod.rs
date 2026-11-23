@@ -44,7 +44,7 @@ pub async fn run_diagnostics(config: &Config) -> Vec<CheckResult> {
 
     results.push(checks::config_parseable());
     results.push(checks::synapse_connectivity(config).await);
-    results.push(checks::sqlite_health(config));
+    results.push(checks::sqlite_health(config).await);
     results.push(checks::memory_ai_route(config));
     results.push(checks::channel_auth(config));
     results.push(checks::mcp_servers(config));

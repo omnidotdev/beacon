@@ -22,7 +22,7 @@ pub struct BackupVerification {
 /// # Errors
 ///
 /// Returns error if backup creation fails
-pub fn create_backup(data_dir: &Path, output: Option<&Path>) -> anyhow::Result<PathBuf> {
+pub async fn create_backup(data_dir: &Path, output: Option<&Path>) -> anyhow::Result<PathBuf> {
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let default_name = format!("beacon-backup-{timestamp}.tar.gz");
     let output_path = output.map_or_else(
@@ -38,16 +38,11 @@ pub fn create_backup(data_dir: &Path, output: Option<&Path>) -> anyhow::Result<P
     let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
 
-    // Back up database using SQLite backup API for consistency
+    // Back up the database as a consistent snapshot (`VACUUM INTO`)
     let db_path = data_dir.join("beacon.db");
     if db_path.exists() {
         let backup_tmp = tempfile::NamedTempFile::new()?;
-        {
-            let src = rusqlite::Connection::open(&db_path)?;
-            let mut dst = rusqlite::Connection::open(backup_tmp.path())?;
-            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
-            backup.run_to_completion(100, std::time::Duration::from_millis(50), None)?;
-        }
+        crate::db::snapshot_sqlite(&db_path, backup_tmp.path()).await?;
         tar.append_path_with_name(backup_tmp.path(), "beacon.db")?;
     }
 

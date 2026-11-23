@@ -26,6 +26,10 @@ pub struct Config {
     /// Path to data directory (database, cache, etc)
     pub data_dir: PathBuf,
 
+    /// Database URL (`BEACON_DATABASE_URL`). Postgres in the cloud; unset keeps
+    /// the self-hosted default, a `SQLite` file at `data_dir/beacon.db`
+    pub database_url: Option<String>,
+
     /// Path to extensions directory
     pub extension_dir: PathBuf,
 
@@ -583,6 +587,19 @@ pub fn persona_cache_dir() -> PathBuf {
 }
 
 impl Config {
+    /// Open the gateway's database: `database_url` when set, otherwise the
+    /// local `SQLite` file in `data_dir`, migrated to the current schema
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the database cannot be opened or migrated
+    pub async fn open_database(&self) -> Result<crate::db::DbPool> {
+        match &self.database_url {
+            Some(url) => crate::db::connect(url).await,
+            None => crate::db::init(self.data_dir.join("beacon.db")).await,
+        }
+    }
+
     /// Load configuration for a persona
     ///
     /// Pass `None` or `Some("")` to run without a persona (uses `Persona::default()`).
@@ -1193,6 +1210,9 @@ impl Config {
             persona,
             persona_cache_dir: cache_dir,
             data_dir: data_dir.clone(),
+            database_url: std::env::var("BEACON_DATABASE_URL")
+                .ok()
+                .filter(|url| !url.is_empty()),
             extension_dir,
             voice,
             api_keys,

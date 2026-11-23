@@ -49,12 +49,8 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns error if initialization fails
-    #[allow(clippy::unused_async)]
-    pub fn new(config: Config, port: u16) -> Result<Self> {
-        let db_path = config.data_dir.join("beacon.db");
-        let db = db::init(&db_path)?;
-
-        tracing::info!(path = %db_path.display(), "database initialized");
+    pub async fn new(config: Config, port: u16) -> Result<Self> {
+        let db = config.open_database().await?;
 
         Ok(Self { config, port, db })
     }
@@ -287,13 +283,13 @@ impl Daemon {
                     }
                 }
             }
-            if let Err(e) = crate::skills::sync_discovered_skills(&skill_repo, &registry) {
+            if let Err(e) = crate::skills::sync_discovered_skills(&skill_repo, &registry).await {
                 tracing::warn!(error = %e, "skill sync failed");
             }
         }
 
         // Load enabled skills for system prompt injection
-        let enabled_skills = skill_repo.list_enabled().unwrap_or_default();
+        let enabled_skills = skill_repo.list_enabled().await.unwrap_or_default();
         if !enabled_skills.is_empty() {
             tracing::info!(count = enabled_skills.len(), "loaded enabled skills");
         }
@@ -615,6 +611,7 @@ impl Daemon {
         // Sync bot commands with Telegram (skill-derived command menu)
         let skill_commands: Vec<crate::channels::BotCommand> = skill_repo
             .list_enabled_for_user(None)
+            .await
             .unwrap_or_default()
             .iter()
             .filter(|s| s.skill.metadata.user_invocable)
@@ -2005,7 +2002,10 @@ async fn check_pairing<C: Channel>(
     channel: &C,
 ) -> PairingResult {
     // Check if sender is allowed
-    let allowed = match pairing_manager.is_allowed(&msg.sender_id, channel_name) {
+    let allowed = match pairing_manager
+        .is_allowed(&msg.sender_id, channel_name)
+        .await
+    {
         Ok(allowed) => allowed,
         Err(e) => {
             tracing::error!(error = %e, "pairing check failed, defaulting to deny");
@@ -2044,7 +2044,10 @@ async fn check_pairing<C: Channel>(
             let trimmed = msg.content.trim().to_uppercase();
             if trimmed.len() == 6 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
                 // Try to verify the code
-                match pairing_manager.verify_pairing(&msg.sender_id, channel_name, &trimmed) {
+                match pairing_manager
+                    .verify_pairing(&msg.sender_id, channel_name, &trimmed)
+                    .await
+                {
                     Ok(true) => {
                         // Send success message
                         let response = OutgoingMessage {
@@ -2072,7 +2075,10 @@ async fn check_pairing<C: Channel>(
             }
 
             // Generate pairing code for new sender
-            match pairing_manager.generate_pairing_code(&msg.sender_id, channel_name) {
+            match pairing_manager
+                .generate_pairing_code(&msg.sender_id, channel_name)
+                .await
+            {
                 Ok(Some(code)) => {
                     let response = OutgoingMessage {
                         channel_id: msg.channel_id.clone(),
@@ -2222,7 +2228,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         };
 
         // Find or create user and session
-        let user = match user_repo.find_or_create(&msg.sender_id) {
+        let user = match user_repo.find_or_create(&msg.sender_id).await {
             Ok(u) => u,
             Err(e) => {
                 tracing::error!(error = %e, "failed to find/create user");
@@ -2245,13 +2251,16 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             "resolved agent for message"
         );
 
-        let session = match session_repo.find_or_create_with_agent(
-            &user.id,
-            channel_name,
-            &msg.channel_id,
-            &persona_id,
-            resolved_agent.as_str(),
-        ) {
+        let session = match session_repo
+            .find_or_create_with_agent(
+                &user.id,
+                channel_name,
+                &msg.channel_id,
+                &persona_id,
+                resolved_agent.as_str(),
+            )
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "failed to find/create session");
@@ -2260,7 +2269,7 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         };
 
         // Publish beacon.conversation.started for new sessions (best-effort)
-        match session_repo.message_count(&session.id) {
+        match session_repo.message_count(&session.id).await {
             Ok(0) => {
                 crate::events::publish(crate::events::build_conversation_started_event(
                     &session.id,
@@ -2353,12 +2362,10 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         let thread_id = msg.reply_to.as_deref();
 
         // Store user message with thread context
-        if let Err(e) = session_repo.add_message_with_thread(
-            &session.id,
-            MessageRole::User,
-            &msg.content,
-            thread_id,
-        ) {
+        if let Err(e) = session_repo
+            .add_message_with_thread(&session.id, MessageRole::User, &msg.content, thread_id)
+            .await
+        {
             tracing::warn!(error = %e, "failed to store user message");
         }
 
@@ -2372,15 +2379,17 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
             persona_system_prompt: persona_system_prompt.clone(),
         };
         let context_builder = ContextBuilder::new(context_config);
-        let mut built_context = context_builder.build_with_thread(
-            &session.id,
-            &user.id,
-            user.life_json_path.as_deref(),
-            &session_repo,
-            &user_repo,
-            Some((&memory_repo, msg.content.as_str())),
-            thread_id,
-        );
+        let mut built_context = context_builder
+            .build_with_thread(
+                &session.id,
+                &user.id,
+                user.life_json_path.as_deref(),
+                &session_repo,
+                &user_repo,
+                Some((&memory_repo, msg.content.as_str())),
+                thread_id,
+            )
+            .await;
 
         if let Ok(ctx) = &built_context {
             tracing::debug!(
@@ -2953,12 +2962,10 @@ async fn handle_channel_messages<C: Channel + Send + 'static>(
         let response = hook_result.modified_response.unwrap_or(response);
 
         // Store assistant response with thread context
-        if let Err(e) = session_repo.add_message_with_thread(
-            &session.id,
-            MessageRole::Assistant,
-            &response,
-            thread_id,
-        ) {
+        if let Err(e) = session_repo
+            .add_message_with_thread(&session.id, MessageRole::Assistant, &response, thread_id)
+            .await
+        {
             tracing::warn!(error = %e, "failed to store assistant message");
         }
 

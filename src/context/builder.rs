@@ -122,7 +122,7 @@ impl ContextBuilder {
     /// # Errors
     ///
     /// Returns error if database operations fail
-    pub fn build(
+    pub async fn build(
         &self,
         session_id: &str,
         user_id: &str,
@@ -139,6 +139,7 @@ impl ContextBuilder {
             None,
             None,
         )
+        .await
     }
 
     /// Build context for a session with query-driven semantic memory retrieval.
@@ -150,7 +151,7 @@ impl ContextBuilder {
     /// # Errors
     ///
     /// Returns error if database operations fail
-    pub fn build_with_memory(
+    pub async fn build_with_memory(
         &self,
         session_id: &str,
         user_id: &str,
@@ -168,6 +169,7 @@ impl ContextBuilder {
             memory,
             None,
         )
+        .await
     }
 
     /// Build context for a session with memory and thread support.
@@ -182,7 +184,7 @@ impl ContextBuilder {
     ///
     /// Returns error if database operations fail
     #[allow(clippy::too_many_arguments)]
-    pub fn build_with_thread(
+    pub async fn build_with_thread(
         &self,
         session_id: &str,
         user_id: &str,
@@ -208,6 +210,7 @@ impl ContextBuilder {
         if let Some((repo, query)) = memory {
             let memories = repo
                 .search_hybrid(user_id, query, None, self.config.max_memories)
+                .await
                 .unwrap_or_default();
             if !memories.is_empty() {
                 let memory_context = format_memories(&memories);
@@ -218,7 +221,7 @@ impl ContextBuilder {
         }
 
         // Load learned user context from database
-        let user_contexts = user_repo.get_context(user_id).unwrap_or_default();
+        let user_contexts = user_repo.get_context(user_id).await.unwrap_or_default();
         if !user_contexts.is_empty() {
             let learned_context = format_user_context(&user_contexts);
             if !learned_context.is_empty() {
@@ -232,10 +235,12 @@ impl ContextBuilder {
         let messages = if thread_id.is_some() {
             session_repo
                 .get_messages_in_thread(session_id, thread_id, self.config.max_messages)
+                .await
                 .unwrap_or_default()
         } else {
             session_repo
                 .get_messages(session_id, self.config.max_messages)
+                .await
                 .unwrap_or_default()
         };
 
@@ -261,7 +266,7 @@ impl ContextBuilder {
     ///
     /// Returns error if database operations fail
     #[allow(clippy::too_many_arguments)]
-    pub fn build_with_semantic_memory(
+    pub async fn build_with_semantic_memory(
         &self,
         session_id: &str,
         user_id: &str,
@@ -285,16 +290,16 @@ impl ContextBuilder {
 
         // Load memories — semantic when embedding available, access-count otherwise
         if let Some(repo) = memory_repo {
-            let memories = query_embedding.map_or_else(
-                || {
-                    repo.get_context(user_id, self.config.max_memories)
-                        .unwrap_or_default()
-                },
-                |embedding| {
-                    repo.search_similar(user_id, embedding, self.config.max_memories)
-                        .unwrap_or_default()
-                },
-            );
+            let memories = match query_embedding {
+                Some(embedding) => repo
+                    .search_similar(user_id, embedding, self.config.max_memories)
+                    .await
+                    .unwrap_or_default(),
+                None => repo
+                    .get_context(user_id, self.config.max_memories)
+                    .await
+                    .unwrap_or_default(),
+            };
 
             if !memories.is_empty() {
                 let memory_context = format_memories(&memories);
@@ -305,7 +310,7 @@ impl ContextBuilder {
         }
 
         // Load learned user context from database
-        let user_contexts = user_repo.get_context(user_id).unwrap_or_default();
+        let user_contexts = user_repo.get_context(user_id).await.unwrap_or_default();
         if !user_contexts.is_empty() {
             let learned_context = format_user_context(&user_contexts);
             if !learned_context.is_empty() {
@@ -317,6 +322,7 @@ impl ContextBuilder {
 
         let messages = session_repo
             .get_messages(session_id, self.config.max_messages)
+            .await
             .unwrap_or_default();
         let (context_messages, estimated_tokens) = self.prune_messages(&messages, &system_context);
 
@@ -647,35 +653,37 @@ mod tests {
         assert_eq!(format_memories(&[]), String::new());
     }
 
-    #[test]
-    fn build_with_memory_uses_query_for_search() {
-        let pool = crate::db::init_memory().unwrap();
+    #[tokio::test]
+    async fn build_with_memory_uses_query_for_search() {
+        let pool = crate::db::init_memory().await.unwrap();
         let session_repo = crate::db::SessionRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool.clone());
         let memory_repo = crate::db::MemoryRepo::new(pool);
 
         // Add a memory
-        let user = user_repo.find_or_create("query_test_user").unwrap();
+        let user = user_repo.find_or_create("query_test_user").await.unwrap();
         let mem = crate::db::Memory::new(
             user.id.clone(),
             crate::db::MemoryCategory::Preference,
             "User prefers Rust over Python".to_string(),
         );
-        memory_repo.add(&mem).unwrap();
+        memory_repo.add(&mem).await.unwrap();
 
         let config = ContextConfig::default();
         let builder = ContextBuilder::new(config);
 
         // Use a single keyword that LIKE-matches the stored memory content
         // (semantic search requires an embedder; unit tests use keyword fallback)
-        let result = builder.build_with_memory(
-            "session_test",
-            &user.id,
-            None,
-            &session_repo,
-            &user_repo,
-            Some((&memory_repo, "Rust")),
-        );
+        let result = builder
+            .build_with_memory(
+                "session_test",
+                &user.id,
+                None,
+                &session_repo,
+                &user_repo,
+                Some((&memory_repo, "Rust")),
+            )
+            .await;
         assert!(result.is_ok());
         // Memory with "Rust" should have been retrieved (keyword match)
         let ctx = result.unwrap();
@@ -686,9 +694,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_with_semantic_memory_uses_search_similar_when_embedding_provided() {
-        let pool = crate::db::init_memory().unwrap();
+    #[tokio::test]
+    async fn build_with_semantic_memory_uses_search_similar_when_embedding_provided() {
+        let pool = crate::db::init_memory().await.unwrap();
         let session_repo = crate::db::SessionRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool);
 
@@ -697,19 +705,21 @@ mod tests {
 
         // Should not panic with a provided embedding (even synthetic zeros)
         let fake_embedding = vec![0.0_f32; 1536];
-        let result = builder.build_with_semantic_memory(
-            "session_1",
-            "user_1",
-            None,
-            &session_repo,
-            &user_repo,
-            None,
-            Some(&fake_embedding),
-        );
+        let result = builder
+            .build_with_semantic_memory(
+                "session_1",
+                "user_1",
+                None,
+                &session_repo,
+                &user_repo,
+                None,
+                Some(&fake_embedding),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "build_with_semantic_memory must not fail: {:?}",
-            result.err()
+            result.as_ref().err()
         );
     }
 }

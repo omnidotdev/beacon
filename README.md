@@ -65,6 +65,15 @@ beacon doctor    # Health check
 beacon status    # Service status
 ```
 
+## Storage
+
+Beacon keeps sessions, messages, memories, skills, and its other state in a SQL database:
+
+- **Self-hosted (default):** a single SQLite file, `beacon.db` in the data directory (`~/.local/share/omni/beacon` on Linux). Nothing to set up; existing databases upgrade in place on start. `beacon backup create` snapshots it while the gateway runs
+- **Postgres:** set `BEACON_DATABASE_URL=postgres://user:password@host:5432/database`. The database needs the [pgvector](https://github.com/pgvector/pgvector) extension (`CREATE EXTENSION vector`, or create it ahead of time if the app role cannot). The hosted deployment uses this, so its data survives redeploys and is backed up with the rest of Beacon's data
+
+Both backends run the same queries and share one schema version; memory and knowledge search use sqlite-vec on SQLite and pgvector on Postgres.
+
 ## Cloud mode and AI credits
 
 With `BEACON_CLOUD_MODE=true` (the hosted deployment), Beacon requires a Gatekeeper JWT and runs managed AI on the user's AI credits:
@@ -98,6 +107,13 @@ cargo build
 cargo test
 cargo clippy --all-targets
 cargo run -- --foreground -v
+```
+
+`cargo test` runs on in-memory SQLite. To also run the suite on Postgres (as CI does), point it at a database with pgvector; each test gets its own throwaway schema, and `tests/schema_parity.rs` checks both backends' schemas match:
+
+```bash
+docker run -d --name beacon-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=beacon_gateway -p 55499:5432 pgvector/pgvector:pg17
+BEACON_TEST_DATABASE_URL=postgres://postgres:test@localhost:55499/beacon_gateway cargo test
 ```
 
 `rust-toolchain.toml` pins the stable toolchain, so local builds and the pre-commit hook (`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, from `.cargo-husky/hooks/pre-commit`) match CI. Clippy covers test code too. Git dependencies such as agent-core resolve from GitHub at the commits recorded in `Cargo.lock`; no sibling checkout is needed.
