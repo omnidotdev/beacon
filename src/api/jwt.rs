@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -15,9 +15,28 @@ pub struct GatekeeperClaims {
     pub iss: Option<String>,
 }
 
+/// Audience Gatekeeper mints into Beacon's access tokens (the beacon-app OAuth
+/// client's RFC 8707 resource), overridable with `BEACON_JWT_AUDIENCE`
+pub const DEFAULT_JWT_AUDIENCE: &str = "https://gateway.beacon.omni.dev";
+
+/// Token validation rules for Beacon access tokens
+///
+/// Checks the signature algorithm, expiry, and that the token was issued by our
+/// identity service for Beacon. Without the audience check, a token Gatekeeper
+/// minted for any other Omni product would be accepted here
+#[must_use]
+pub fn token_validation(alg: Algorithm, issuer: &str, audience: &str) -> Validation {
+    let mut validation = Validation::new(alg);
+    validation.validate_exp = true;
+    validation.set_issuer(&[issuer.trim_end_matches('/')]);
+    validation.set_audience(&[audience]);
+    validation
+}
+
 /// Cached JWKS for validating JWTs
 pub struct JwksCache {
     auth_base_url: String,
+    audience: String,
     client: reqwest::Client,
     keys: Arc<RwLock<Option<CachedJwks>>>,
     jwks_uri: Arc<RwLock<Option<String>>>,
@@ -39,6 +58,10 @@ impl JwksCache {
     pub fn new(auth_base_url: String) -> Self {
         Self {
             auth_base_url,
+            audience: std::env::var("BEACON_JWT_AUDIENCE")
+                .ok()
+                .filter(|aud| !aud.is_empty())
+                .unwrap_or_else(|| DEFAULT_JWT_AUDIENCE.to_string()),
             client: reqwest::Client::new(),
             keys: Arc::new(RwLock::new(None)),
             jwks_uri: Arc::new(RwLock::new(None)),
@@ -82,11 +105,7 @@ impl JwksCache {
             // jsonwebtoken 9.x requires validation.algorithms to contain ONLY
             // algorithms matching the key's family (it checks every listed alg
             // against the key). Use the JWT header's algorithm directly
-            let mut validation = Validation::new(header.alg);
-            validation.validate_exp = true;
-            // Gateway doesn't have a specific audience to check
-            validation.validate_aud = false;
-            validation.required_spec_claims.remove("aud");
+            let validation = token_validation(header.alg, &self.auth_base_url, &self.audience);
 
             match decode::<GatekeeperClaims>(token, &key, &validation) {
                 Ok(data) => return Ok(data.claims),
@@ -205,5 +224,67 @@ impl JwksCache {
         });
 
         Ok(keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde_json::json;
+
+    use super::*;
+
+    const SECRET: &[u8] = b"test-secret";
+    const ISSUER: &str = "https://identity.omni.dev";
+
+    fn token(iss: &str, aud: &serde_json::Value) -> String {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({ "sub": "user-1", "exp": exp, "iss": iss, "aud": aud }),
+            &EncodingKey::from_secret(SECRET),
+        )
+        .unwrap()
+    }
+
+    fn check(token: &str) -> bool {
+        let validation = token_validation(
+            Algorithm::HS256,
+            "https://identity.omni.dev/",
+            DEFAULT_JWT_AUDIENCE,
+        );
+        decode::<GatekeeperClaims>(token, &DecodingKey::from_secret(SECRET), &validation).is_ok()
+    }
+
+    #[test]
+    fn accepts_beacon_tokens() {
+        assert!(check(&token(ISSUER, &json!(DEFAULT_JWT_AUDIENCE))));
+        assert!(check(&token(
+            ISSUER,
+            &json!([
+                "https://identity.omni.dev/oauth2/userinfo",
+                DEFAULT_JWT_AUDIENCE
+            ])
+        )));
+    }
+
+    #[test]
+    fn rejects_tokens_minted_for_other_products() {
+        assert!(!check(&token(
+            ISSUER,
+            &json!("https://api.keystone.omni.dev")
+        )));
+    }
+
+    #[test]
+    fn rejects_tokens_from_other_issuers() {
+        assert!(!check(&token(
+            "https://evil.example",
+            &json!(DEFAULT_JWT_AUDIENCE)
+        )));
     }
 }
