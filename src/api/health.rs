@@ -218,7 +218,11 @@ async fn list_personas(State(state): State<Arc<ApiState>>) -> Json<PersonaListRe
 }
 
 /// Activate a persona (switch to it)
-/// Updates the active persona and system prompt used for chat
+///
+/// A self-hosted gateway serves one person, so this switches the default
+/// persona its chat falls back to. A cloud gateway serves many users, so it
+/// only validates the persona: each client sends its pick with every message,
+/// and one user's choice must never change another's default
 async fn activate_persona(
     State(state): State<Arc<ApiState>>,
     Path(persona_id): Path<String>,
@@ -235,11 +239,13 @@ async fn activate_persona(
             tracing::warn!(persona_id = %persona_id, "persona not found");
             Err(StatusCode::NOT_FOUND)
         }
+        Some((info, _)) if state.cloud_mode => Ok(Json(info)),
         Some((info, system_prompt)) => {
             // Update the active persona
             {
                 let mut active = state.active_persona.write().await;
                 active.id.clone_from(&persona_id);
+                active.name.clone_from(&info.name);
                 active.system_prompt = system_prompt;
             }
             tracing::info!(persona_id = %persona_id, "persona activated");

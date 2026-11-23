@@ -13,9 +13,13 @@ use tower::ServiceExt;
 mod common;
 use common::{create_test_session, create_test_user, setup_test_db};
 
-/// Build a test API router
-fn build_test_router(db: DbPool) -> axum::Router {
-    use axum::Router;
+/// Build test API state
+fn build_test_state(db: DbPool) -> Arc<beacon_gateway::api::ApiState> {
+    build_test_state_with_mode(db, false)
+}
+
+/// Build test API state as a self-hosted (false) or cloud (true) gateway
+fn build_test_state_with_mode(db: DbPool, cloud_mode: bool) -> Arc<beacon_gateway::api::ApiState> {
     use beacon_gateway::db::{MemoryRepo, SessionRepo, SkillRepo, UserRepo};
 
     let tool_policy = Arc::new(ToolPolicy::new(&ToolPolicyConfig::default()));
@@ -30,7 +34,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
     let telegram_group_repo = beacon_gateway::db::TelegramGroupConfigRepo::new(db.clone());
     let db_for_harness = db.clone();
 
-    let state = Arc::new(beacon_gateway::api::ApiState {
+    Arc::new(beacon_gateway::api::ApiState {
         db,
         api_key: Some("test-api-key".to_string()),
         persona_id: "test-persona".to_string(),
@@ -40,7 +44,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
         synapse: None,
         llm_model: "test-model".to_string(),
         llm_max_tokens: 1024,
-        system_prompt: String::new(),
+        system_prompt: "You are TestBot. Keep responses concise and conversational.".to_string(),
         telegram: None,
         teams: None,
         session_repo,
@@ -66,7 +70,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
         persona_knowledge: vec![],
         max_context_tokens: 8000,
         knowledge_cache_dir: std::path::PathBuf::from("/tmp/test-knowledge-cache"),
-        cloud_mode: false,
+        cloud_mode,
         rate_limiter: None,
         ws_senders: None,
         billing_state: None,
@@ -75,6 +79,7 @@ fn build_test_router(db: DbPool) -> axum::Router {
         skills_config: beacon_gateway::config::SkillsConfig::default(),
         active_persona: Arc::new(RwLock::new(beacon_gateway::api::ActivePersona {
             id: "test-persona".to_string(),
+            name: "TestBot".to_string(),
             system_prompt: None,
         })),
         hook_manager: None,
@@ -95,7 +100,14 @@ fn build_test_router(db: DbPool) -> axum::Router {
         usage_repo: None,
         adapter_registry: Arc::new(beacon_gateway::agent::AdapterRegistry::new()),
         harness_session_repo: beacon_gateway::agent::HarnessSessionRepo::new(db_for_harness),
-    });
+    })
+}
+
+/// Build a test API router
+fn build_test_router(db: DbPool) -> axum::Router {
+    use axum::Router;
+
+    let state = build_test_state(db);
 
     Router::new()
         .nest(
@@ -261,4 +273,57 @@ async fn test_admin_session_messages() {
     assert!(json.is_array());
     assert_eq!(json.as_array().unwrap().len(), 1);
     assert_eq!(json[0]["content"], "Hello");
+}
+
+#[test]
+fn test_system_prompt_uses_selected_persona() {
+    let state = build_test_state(setup_test_db());
+
+    let prompt = state.system_prompt_for_persona(
+        None,
+        "Microcap",
+        Some("You are Microcap, a swaggering pink diamond."),
+    );
+
+    assert!(prompt.contains("Microcap"), "prompt: {prompt}");
+    assert!(!prompt.contains("TestBot"), "prompt: {prompt}");
+}
+
+#[test]
+fn test_system_prompt_defaults_to_boot_persona() {
+    let state = build_test_state(setup_test_db());
+
+    let prompt = state.system_prompt_with_skills(None);
+
+    assert!(prompt.contains("TestBot"), "prompt: {prompt}");
+}
+
+/// Activate the embedded Microcap persona and return the gateway's fallback persona id
+async fn activate_microcap(cloud_mode: bool) -> String {
+    let state = build_test_state_with_mode(setup_test_db(), cloud_mode);
+    let app = beacon_gateway::api::health::ready_router(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/personas/microcap/activate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    state.active_persona.read().await.id.clone()
+}
+
+#[tokio::test]
+async fn test_activate_switches_default_when_self_hosted() {
+    assert_eq!(activate_microcap(false).await, "microcap");
+}
+
+#[tokio::test]
+async fn test_activate_leaves_shared_default_alone_in_cloud() {
+    assert_eq!(activate_microcap(true).await, "test-persona");
 }
