@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.88-slim AS builder
+# sqlx 0.9 needs rustc 1.94+; bookworm matches the runtime image below
+FROM rust:1.99-slim-bookworm AS builder
 
 WORKDIR /app
 
