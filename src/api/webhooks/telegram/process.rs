@@ -150,7 +150,10 @@ pub async fn process_telegram_message(
 
     // Pairing check (if pairing manager is available)
     if let Some(ref pm) = state.pairing_manager {
-        let allowed = pm.is_allowed(&msg.sender_id, "telegram").unwrap_or(false);
+        let allowed = pm
+            .is_allowed(&msg.sender_id, "telegram")
+            .await
+            .unwrap_or(false);
         if !allowed {
             match pm.policy() {
                 crate::security::DmPolicy::Open => {}
@@ -167,7 +170,8 @@ pub async fn process_telegram_message(
                     let trimmed = msg.content.trim().to_uppercase();
                     if trimmed.len() == 6 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
                         if matches!(
-                            pm.verify_pairing(&msg.sender_id, "telegram", &trimmed),
+                            pm.verify_pairing(&msg.sender_id, "telegram", &trimmed)
+                                .await,
                             Ok(true)
                         ) {
                             let _ = telegram
@@ -182,7 +186,7 @@ pub async fn process_telegram_message(
                             return Ok(());
                         }
                     } else if let Ok(Some(code)) =
-                        pm.generate_pairing_code(&msg.sender_id, "telegram")
+                        pm.generate_pairing_code(&msg.sender_id, "telegram").await
                     {
                         let _ = telegram
                             .send_message(
@@ -221,22 +225,20 @@ pub async fn process_telegram_message(
     }
 
     // Find or create user and session
-    let user = state.user_repo.find_or_create(&msg.sender_id)?;
+    let user = state.user_repo.find_or_create(&msg.sender_id).await?;
 
     // Scope session key by account_id for multi-account isolation
     let session_channel_id = match &account_id {
         Some(aid) if aid != "default" => format!("{aid}:{}", msg.channel_id),
         _ => msg.channel_id.clone(),
     };
-    let session = state.session_repo.find_or_create(
-        &user.id,
-        "telegram",
-        &session_channel_id,
-        &state.persona_id,
-    )?;
+    let session = state
+        .session_repo
+        .find_or_create(&user.id, "telegram", &session_channel_id, &state.persona_id)
+        .await?;
 
     // Publish beacon.conversation.started for new sessions
-    match state.session_repo.message_count(&session.id) {
+    match state.session_repo.message_count(&session.id).await {
         Ok(0) => {
             crate::events::publish(crate::events::build_conversation_started_event(
                 &session.id,
@@ -257,12 +259,11 @@ pub async fn process_telegram_message(
     let thread_id = msg.thread_id.as_deref();
 
     // Store user message with thread context
-    if let Err(e) = state.session_repo.add_message_with_thread(
-        &session.id,
-        MessageRole::User,
-        &content,
-        thread_id,
-    ) {
+    if let Err(e) = state
+        .session_repo
+        .add_message_with_thread(&session.id, MessageRole::User, &content, thread_id)
+        .await
+    {
         tracing::warn!(error = %e, "failed to store user message");
     }
 
@@ -273,7 +274,7 @@ pub async fn process_telegram_message(
 
     // Run session compaction if needed (non-fatal on failure)
     if let Some(ref compactor) = state.session_compactor
-        && let Ok(count) = state.session_repo.message_count(&session.id)
+        && let Ok(count) = state.session_repo.message_count(&session.id).await
         && compactor.needs_compaction(count)
         && let Err(e) = compactor
             .compact(
@@ -297,15 +298,17 @@ pub async fn process_telegram_message(
         persona_system_prompt: state.persona_system_prompt.clone(),
     };
     let context_builder = ContextBuilder::new(context_config);
-    let mut built_context = context_builder.build_with_thread(
-        &session.id,
-        &user.id,
-        user.life_json_path.as_deref(),
-        &state.session_repo,
-        &state.user_repo,
-        Some((&state.memory_repo, msg.content.as_str())),
-        thread_id,
-    );
+    let mut built_context = context_builder
+        .build_with_thread(
+            &session.id,
+            &user.id,
+            user.life_json_path.as_deref(),
+            &state.session_repo,
+            &state.user_repo,
+            Some((&state.memory_repo, msg.content.as_str())),
+            thread_id,
+        )
+        .await;
 
     if let Ok(ctx) = &built_context {
         tracing::debug!(
@@ -336,6 +339,7 @@ pub async fn process_telegram_message(
             state
                 .telegram_group_repo
                 .get(&msg.channel_id)
+                .await
                 .ok()
                 .flatten()
         } else {
@@ -438,12 +442,10 @@ pub async fn process_telegram_message(
                 .await;
 
             // Store and finish
-            let _ = state.session_repo.add_message_with_thread(
-                &session.id,
-                MessageRole::Assistant,
-                &reply,
-                thread_id,
-            );
+            let _ = state
+                .session_repo
+                .add_message_with_thread(&session.id, MessageRole::Assistant, &reply, thread_id)
+                .await;
             skip_agent = true;
         } else if let Some(hook_reply) = hook_result.reply {
             let _ = telegram
@@ -484,7 +486,7 @@ pub async fn process_telegram_message(
 
         // Multi-turn tool loop with streaming support
         let mut messages = vec![
-            synapse_client::Message::system(&state.system_prompt_with_skills(Some(&user.id))),
+            synapse_client::Message::system(&state.system_prompt_with_skills(Some(&user.id)).await),
             synapse_client::Message::user(&augmented_prompt),
         ];
         let mut final_response = String::new();
@@ -677,12 +679,11 @@ pub async fn process_telegram_message(
     };
 
     // Store assistant response with thread context
-    if let Err(e) = state.session_repo.add_message_with_thread(
-        &session.id,
-        MessageRole::Assistant,
-        &response,
-        thread_id,
-    ) {
+    if let Err(e) = state
+        .session_repo
+        .add_message_with_thread(&session.id, MessageRole::Assistant, &response, thread_id)
+        .await
+    {
         tracing::warn!(error = %e, "failed to store assistant message");
     }
 

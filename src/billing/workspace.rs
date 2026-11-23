@@ -173,22 +173,24 @@ impl WorkspaceResolver {
     /// database). `None` when nothing is cached; callers that may bill use
     /// [`Self::resolve_user`] or [`Self::resolve`], which ask Gatekeeper
     #[must_use]
-    pub fn entity_for(&self, user_id: &str) -> Option<BillingEntity> {
+    pub async fn entity_for(&self, user_id: &str) -> Option<BillingEntity> {
         let key = user_id.to_string();
 
         if let Some(workspace_id) = self.personal.get(&key) {
             return Some(BillingEntity::organization(workspace_id));
         }
 
-        let recorded = self.store.as_ref().and_then(|store| {
-            store
+        let recorded = match self.store.as_ref() {
+            Some(store) => store
                 .get(user_id)
+                .await
                 .map_err(|e| {
                     tracing::warn!(user_id = %user_id, error = %e, "billing workspace read failed");
                 })
                 .ok()
-                .flatten()
-        })?;
+                .flatten(),
+            None => None,
+        }?;
 
         self.personal.insert(key, recorded.clone());
         Some(BillingEntity::organization(recorded))
@@ -207,7 +209,7 @@ impl WorkspaceResolver {
         user_id: &str,
         token: &str,
     ) -> Result<BillingEntity, WorkspaceError> {
-        if let Some(entity) = self.entity_for(user_id) {
+        if let Some(entity) = self.entity_for(user_id).await {
             return Ok(entity);
         }
 
@@ -228,7 +230,7 @@ impl WorkspaceResolver {
 
         match self.fetch_personal_workspace(token).await {
             Ok(Some(workspace_id)) => {
-                self.remember(user_id, &workspace_id);
+                self.remember(user_id, &workspace_id).await;
                 Ok(BillingEntity::organization(workspace_id))
             }
             Ok(None) => {
@@ -263,7 +265,7 @@ impl WorkspaceResolver {
     /// Returns [`WorkspaceError::Unavailable`] when the lookup itself fails.
     /// The user entity is never billed instead
     pub async fn resolve_user(&self, user_id: &str) -> Result<BillingEntity, WorkspaceError> {
-        if let Some(entity) = self.entity_for(user_id) {
+        if let Some(entity) = self.entity_for(user_id).await {
             return Ok(entity);
         }
 
@@ -278,7 +280,7 @@ impl WorkspaceResolver {
 
         match self.fetch_by_user_id(service, user_id).await {
             Ok(Lookup::Found(workspace_id)) => {
-                self.remember(user_id, &workspace_id);
+                self.remember(user_id, &workspace_id).await;
                 Ok(BillingEntity::organization(workspace_id))
             }
             Ok(Lookup::NotFound) => {
@@ -299,12 +301,12 @@ impl WorkspaceResolver {
     }
 
     /// Record a user's personal workspace
-    pub fn remember(&self, user_id: &str, workspace_id: &str) {
+    pub async fn remember(&self, user_id: &str, workspace_id: &str) {
         self.personal
             .insert(user_id.to_string(), workspace_id.to_string());
 
         if let Some(store) = &self.store
-            && let Err(e) = store.set(user_id, workspace_id)
+            && let Err(e) = store.set(user_id, workspace_id).await
         {
             tracing::warn!(user_id = %user_id, error = %e, "billing workspace write failed");
         }
@@ -439,34 +441,35 @@ mod tests {
         assert_eq!(personal_workspace_id(&slim), None);
     }
 
-    #[test]
-    fn unknown_users_bill_nothing() {
+    #[tokio::test]
+    async fn unknown_users_bill_nothing() {
         let resolver = WorkspaceResolver::new(None);
-        assert_eq!(resolver.entity_for(USER), None);
+        assert_eq!(resolver.entity_for(USER).await, None);
     }
 
-    #[test]
-    fn remembered_users_bill_their_personal_workspace() {
+    #[tokio::test]
+    async fn remembered_users_bill_their_personal_workspace() {
         let resolver = WorkspaceResolver::new(None);
-        resolver.remember(USER, PERSONAL);
-        let entity = resolver.entity_for(USER).unwrap();
+        resolver.remember(USER, PERSONAL).await;
+        let entity = resolver.entity_for(USER).await.unwrap();
         assert_eq!(entity.entity_type, BillingEntityType::Organization);
         assert_eq!(entity.entity_id, PERSONAL);
         assert_eq!(entity.kind(), "organization");
     }
 
-    #[test]
-    fn a_recorded_workspace_survives_a_restart() {
-        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
+    #[tokio::test]
+    async fn a_recorded_workspace_survives_a_restart() {
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().await.unwrap());
 
         WorkspaceResolver::new(None)
             .with_store(store.clone())
-            .remember(USER, PERSONAL);
+            .remember(USER, PERSONAL)
+            .await;
 
         // A fresh resolver (a restarted gateway) reads it back for tokenless work
         let restarted = WorkspaceResolver::new(None).with_store(store);
         assert_eq!(
-            restarted.entity_for(USER),
+            restarted.entity_for(USER).await,
             Some(BillingEntity::organization(PERSONAL))
         );
     }
@@ -518,7 +521,7 @@ mod tests {
         let again = resolver.resolve(USER, "user-token").await;
         assert_eq!(again, Ok(BillingEntity::organization(PERSONAL)));
         assert_eq!(
-            resolver.entity_for(USER),
+            resolver.entity_for(USER).await,
             Some(BillingEntity::organization(PERSONAL))
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -537,7 +540,7 @@ mod tests {
             resolver.resolve(USER, "user-token").await,
             Err(WorkspaceError::Unavailable)
         );
-        assert_eq!(resolver.entity_for(USER), None);
+        assert_eq!(resolver.entity_for(USER).await, None);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -644,8 +647,9 @@ mod tests {
         let (base, calls) = spawn_service_gatekeeper(StatusCode::OK).await;
 
         // Before the restart: resolved and cached in memory and the database
-        let before = service_resolver(&base)
-            .with_store(BillingWorkspaceRepo::new(crate::db::init_memory().unwrap()));
+        let before = service_resolver(&base).with_store(BillingWorkspaceRepo::new(
+            crate::db::init_memory().await.unwrap(),
+        ));
         assert_eq!(
             before.resolve_user(USER).await,
             Ok(BillingEntity::organization(PERSONAL))
@@ -653,9 +657,9 @@ mod tests {
 
         // After the restart: no memory and an empty database (the disk did
         // not survive), and no user token: Gatekeeper resolves it by user id
-        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().await.unwrap());
         let restarted = service_resolver(&base).with_store(store.clone());
-        assert_eq!(restarted.entity_for(USER), None);
+        assert_eq!(restarted.entity_for(USER).await, None);
         assert_eq!(
             restarted.resolve_user(USER).await,
             Ok(BillingEntity::organization(PERSONAL))
@@ -663,7 +667,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         // Cached again, in the database too, so later turns skip the lookup
-        assert_eq!(store.get(USER).unwrap().as_deref(), Some(PERSONAL));
+        assert_eq!(store.get(USER).await.unwrap().as_deref(), Some(PERSONAL));
         assert_eq!(
             restarted.resolve_user(USER).await,
             Ok(BillingEntity::organization(PERSONAL))
@@ -674,8 +678,8 @@ mod tests {
     #[tokio::test]
     async fn a_surviving_cache_skips_the_lookup_after_a_restart() {
         let (base, calls) = spawn_service_gatekeeper(StatusCode::OK).await;
-        let store = BillingWorkspaceRepo::new(crate::db::init_memory().unwrap());
-        store.set(USER, PERSONAL).unwrap();
+        let store = BillingWorkspaceRepo::new(crate::db::init_memory().await.unwrap());
+        store.set(USER, PERSONAL).await.unwrap();
 
         let restarted = service_resolver(&base).with_store(store);
         assert_eq!(
@@ -698,7 +702,7 @@ mod tests {
             resolver.resolve_user(USER).await,
             Err(WorkspaceError::Unavailable)
         );
-        assert_eq!(resolver.entity_for(USER), None);
+        assert_eq!(resolver.entity_for(USER).await, None);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -735,7 +739,7 @@ mod tests {
             Err(WorkspaceError::ReauthRequired)
         );
 
-        resolver.remember(USER, PERSONAL);
+        resolver.remember(USER, PERSONAL).await;
         assert_eq!(
             resolver.resolve_user(USER).await,
             Ok(BillingEntity::organization(PERSONAL))

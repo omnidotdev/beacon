@@ -350,6 +350,7 @@ async fn handle_socket(
             let messages = state
                 .session_repo
                 .get_messages(&sid, 50)
+                .await
                 .unwrap_or_default();
             if messages.len() < 2 {
                 return;
@@ -464,6 +465,7 @@ async fn handle_chat_message(
     let user = state
         .user_repo
         .find_or_create(&user_id)
+        .await
         .map_err(|e| crate::Error::Database(e.to_string()))?;
 
     tracing::info!(
@@ -515,6 +517,7 @@ async fn handle_chat_message(
     let session = state
         .session_repo
         .find_or_create(&user_id, "web", session_id, &active_persona_id)
+        .await
         .map_err(|e| crate::Error::Database(e.to_string()))?;
 
     tracing::info!(
@@ -573,7 +576,7 @@ async fn handle_chat_message(
             "self-hosted mode: trying local key resolution"
         );
         // Self-hosted: try locally stored keys before falling back to shared client
-        if let Some((client, model)) = resolve_local_key(state) {
+        if let Some((client, model)) = resolve_local_key(state).await {
             (Some(client), Some(model))
         } else {
             (state.synapse.clone(), None)
@@ -607,15 +610,17 @@ async fn handle_chat_message(
     } else {
         None
     };
-    let mut built_context = context_builder.build_with_semantic_memory(
-        &session.id,
-        &user_id,
-        user.life_json_path.as_deref(),
-        &state.session_repo,
-        &state.user_repo,
-        Some(&state.memory_repo),
-        query_embedding.as_deref(),
-    );
+    let mut built_context = context_builder
+        .build_with_semantic_memory(
+            &session.id,
+            &user_id,
+            user.life_json_path.as_deref(),
+            &state.session_repo,
+            &state.user_repo,
+            Some(&state.memory_repo),
+            query_embedding.as_deref(),
+        )
+        .await;
 
     // Inject knowledge based on conversation context + embeddings
     if let Ok(ref mut ctx) = built_context
@@ -625,6 +630,7 @@ async fn handle_chat_message(
         let prior_texts: Vec<String> = state
             .session_repo
             .get_messages(&session.id, 4)
+            .await
             .unwrap_or_default()
             .into_iter()
             .rev()
@@ -687,6 +693,7 @@ async fn handle_chat_message(
     // Resolve slash command if present
     let slash_action =
         crate::skills::resolve_slash_command(content, &state.skill_repo, gatekeeper_user_id)
+            .await
             .unwrap_or(None);
 
     // Handle tool dispatch: execute tool directly and return result without LLM
@@ -743,11 +750,13 @@ async fn handle_chat_message(
         // Identity comes from the persona resolved for this message, not the
         // gateway's boot persona, so picking a persona actually changes who
         // replies
-        state.system_prompt_for_persona(
-            gatekeeper_user_id,
-            &active_persona_name,
-            active_system_prompt.as_deref(),
-        )
+        state
+            .system_prompt_for_persona(
+                gatekeeper_user_id,
+                &active_persona_name,
+                active_system_prompt.as_deref(),
+            )
+            .await
     };
 
     // Append invoked slash skill to system prompt
@@ -840,7 +849,7 @@ async fn handle_chat_message(
             // dedicated outcome and is never retried on another model
             if let Some(failure) = crate::billing::gateway_error::classify(&e.to_string()) {
                 if let Some(gk_user_id) = gatekeeper_user_id {
-                    super::managed::note_gateway_failure(state, gk_user_id, failure);
+                    super::managed::note_gateway_failure(state, gk_user_id, failure).await;
                 }
                 send_error(&tx, failure.code(), failure.user_message()).await?;
                 return Ok(());
@@ -870,6 +879,7 @@ async fn handle_chat_message(
     let message = state
         .session_repo
         .get_messages(&session.id, 1)
+        .await
         .map_err(|e| crate::Error::Database(e.to_string()))
         .and_then(|msgs| {
             msgs.into_iter()
@@ -917,7 +927,7 @@ async fn handle_chat_message(
 /// a `SynapseClient` configured with the first stored key found.
 ///
 /// Returns `None` if no local key store is configured or no keys are stored.
-fn resolve_local_key(state: &Arc<ApiState>) -> Option<(Arc<SynapseClient>, String)> {
+async fn resolve_local_key(state: &Arc<ApiState>) -> Option<(Arc<SynapseClient>, String)> {
     let store = state.local_key_store.as_ref()?;
     let synapse_base_url = state.synapse.as_ref().map_or_else(
         || "http://localhost:6000".to_string(),
@@ -929,7 +939,7 @@ fn resolve_local_key(state: &Arc<ApiState>) -> Option<(Arc<SynapseClient>, Strin
         ("openai", "gpt-4o"),
         ("openrouter", "gpt-4o"),
     ] {
-        if let Ok(Some(stored)) = store.get(provider) {
+        if let Ok(Some(stored)) = store.get(provider).await {
             let model = stored
                 .model_preference
                 .unwrap_or_else(|| (*default_model).to_string());

@@ -259,13 +259,17 @@ async fn confirm_pairing(
     // For now, trust the client-provided device_id
 
     // Register the device
-    let device = match state.device_manager.register(
-        &body.device_id,
-        &body.public_key,
-        &body.device_name,
-        body.platform.as_deref(),
-        TrustLevel::Paired,
-    ) {
+    let device = match state
+        .device_manager
+        .register(
+            &body.device_id,
+            &body.public_key,
+            &body.device_name,
+            body.platform.as_deref(),
+            TrustLevel::Paired,
+        )
+        .await
+    {
         Ok(d) => d,
         Err(e) => {
             return (
@@ -346,7 +350,7 @@ async fn get_gateway_info(State(state): State<Arc<PairingState>>) -> impl IntoRe
 
 /// List all paired devices
 async fn list_devices(State(state): State<Arc<PairingState>>) -> impl IntoResponse {
-    match state.device_manager.list() {
+    match state.device_manager.list().await {
         Ok(devices) => {
             let infos: Vec<PairedDeviceInfo> = devices.into_iter().map(Into::into).collect();
             Ok(Json(infos))
@@ -360,7 +364,7 @@ async fn get_device(
     State(state): State<Arc<PairingState>>,
     Path(device_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.device_manager.get(&device_id) {
+    match state.device_manager.get(&device_id).await {
         Ok(Some(device)) => Ok(Json(PairedDeviceInfo::from(device))),
         Ok(None) => Err((StatusCode::NOT_FOUND, "device not found".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -372,7 +376,7 @@ async fn revoke_device(
     State(state): State<Arc<PairingState>>,
     Path(device_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.device_manager.remove(&device_id) {
+    match state.device_manager.remove(&device_id).await {
         Ok(true) => {
             tracing::info!(device_id = %device_id, "device revoked");
             StatusCode::NO_CONTENT
@@ -393,6 +397,7 @@ async fn update_trust(
     match state
         .device_manager
         .update_trust_level(&device_id, trust_level)
+        .await
     {
         Ok(()) => {
             tracing::info!(device_id = %device_id, trust_level = %trust_level, "trust level updated");
@@ -407,8 +412,8 @@ mod tests {
     use super::*;
     use crate::db::init_memory;
 
-    fn setup() -> Arc<PairingState> {
-        let pool = init_memory().unwrap();
+    async fn setup() -> Arc<PairingState> {
+        let pool = init_memory().await.unwrap();
         let device_manager = DeviceManager::new(pool);
         let gateway_identity = DeviceIdentity::generate("test-gateway");
         Arc::new(PairingState::new(device_manager, gateway_identity))
@@ -416,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_expired() {
-        let state = setup();
+        let state = setup().await;
 
         // Add an expired request (manually set expiry)
         let mut request = PairingRequest::generate();

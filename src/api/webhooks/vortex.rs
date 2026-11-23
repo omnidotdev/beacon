@@ -194,7 +194,7 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
     );
 
     // Get user for context building
-    let user = state.user_repo.find_or_create(user_id)?;
+    let user = state.user_repo.find_or_create(user_id).await?;
 
     // Cloud mode runs on the user's product-scoped managed key (never the
     // shared client); self-hosted uses the local client
@@ -214,12 +214,10 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
     let check_in_message = if let Some(synapse) = &check_in_client {
         // Find or create session for this channel
         let channel_id_str = channel_id.unwrap_or(user_id);
-        let session = state.session_repo.find_or_create(
-            &user.id,
-            channel,
-            channel_id_str,
-            &state.persona_id,
-        )?;
+        let session = state
+            .session_repo
+            .find_or_create(&user.id, channel, channel_id_str, &state.persona_id)
+            .await?;
 
         // Build context with memory
         let context_config = crate::api::ApiServer::context_config(
@@ -227,14 +225,16 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
             state.persona_system_prompt.clone(),
         );
         let context_builder = ContextBuilder::new(context_config);
-        let built_context = context_builder.build_with_memory(
-            &session.id,
-            &user.id,
-            user.life_json_path.as_deref(),
-            &state.session_repo,
-            &state.user_repo,
-            Some((&state.memory_repo, prompt)),
-        );
+        let built_context = context_builder
+            .build_with_memory(
+                &session.id,
+                &user.id,
+                user.life_json_path.as_deref(),
+                &state.session_repo,
+                &state.user_repo,
+                Some((&state.memory_repo, prompt)),
+            )
+            .await;
 
         let augmented_prompt = built_context
             .as_ref()
@@ -243,7 +243,7 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
         let request = synapse_client::ChatRequest {
             model: check_in_model,
             messages: vec![
-                synapse_client::Message::system(&state.system_prompt_with_skills(None)),
+                synapse_client::Message::system(&state.system_prompt_with_skills(None).await),
                 synapse_client::Message::user(&augmented_prompt),
             ],
             stream: false,
@@ -263,10 +263,10 @@ async fn handle_check_in(state: &ApiState, callback: &VortexCallback) -> crate::
                     .and_then(|c| c.message.content.clone())
                     .unwrap_or_default();
                 // Store assistant response
-                if let Err(e) =
-                    state
-                        .session_repo
-                        .add_message(&session.id, MessageRole::Assistant, &response)
+                if let Err(e) = state
+                    .session_repo
+                    .add_message(&session.id, MessageRole::Assistant, &response)
+                    .await
                 {
                     tracing::warn!(error = %e, "failed to store check-in message");
                 }
@@ -317,32 +317,32 @@ async fn handle_agent_run(state: &ApiState, callback: &VortexCallback) -> crate:
     );
 
     // Find or create user
-    let user = state.user_repo.find_or_create(&payload.user_id)?;
+    let user = state.user_repo.find_or_create(&payload.user_id).await?;
 
     // Resolve persona
     let persona_id = payload.persona_id.as_deref().unwrap_or(&state.persona_id);
     let system_prompt = state.persona_system_prompt.clone().unwrap_or_default();
 
     // Find or create session for this channel
-    let session = state.session_repo.find_or_create(
-        &user.id,
-        &payload.channel,
-        &payload.channel_id,
-        persona_id,
-    )?;
+    let session = state
+        .session_repo
+        .find_or_create(&user.id, &payload.channel, &payload.channel_id, persona_id)
+        .await?;
 
     // Build context with memory
     let context_config =
         crate::api::ApiServer::context_config(persona_id, state.persona_system_prompt.clone());
     let context_builder = ContextBuilder::new(context_config);
-    let built_context = context_builder.build_with_memory(
-        &session.id,
-        &user.id,
-        user.life_json_path.as_deref(),
-        &state.session_repo,
-        &state.user_repo,
-        Some((&state.memory_repo, &payload.prompt)),
-    );
+    let built_context = context_builder
+        .build_with_memory(
+            &session.id,
+            &user.id,
+            user.life_json_path.as_deref(),
+            &state.session_repo,
+            &state.user_repo,
+            Some((&state.memory_repo, &payload.prompt)),
+        )
+        .await;
 
     let augmented_prompt = built_context.as_ref().map_or_else(
         |_| payload.prompt.clone(),
@@ -389,7 +389,8 @@ async fn handle_agent_run(state: &ApiState, callback: &VortexCallback) -> crate:
         Err(e) => match crate::billing::gateway_error::classify(&e.to_string()) {
             Some(failure) => {
                 if state.cloud_mode {
-                    crate::api::managed::note_gateway_failure(state, &payload.user_id, failure);
+                    crate::api::managed::note_gateway_failure(state, &payload.user_id, failure)
+                        .await;
                 }
                 failure.user_message()
             }

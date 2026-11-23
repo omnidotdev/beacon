@@ -149,7 +149,7 @@ impl Indexer {
                 memory = memory.with_source(sid.to_string(), ch.to_string());
             }
 
-            self.memory_repo.add(&memory)?;
+            self.memory_repo.add(&memory).await?;
             memories.push(memory);
         }
 
@@ -282,10 +282,10 @@ fn validate_memory_content(content: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn indexer_is_clone() {
+    #[tokio::test]
+    async fn indexer_is_clone() {
         use crate::db::MemoryRepo;
-        let pool = crate::db::init_memory().unwrap();
+        let pool = crate::db::init_memory().await.unwrap();
         let memory_repo = MemoryRepo::new(pool);
         let indexer = Indexer::new(memory_repo);
         // The clone is the point: Indexer must stay Clone

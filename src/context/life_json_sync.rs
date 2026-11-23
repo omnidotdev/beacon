@@ -43,14 +43,14 @@ pub struct ImportResult {
 /// # Errors
 ///
 /// Returns error if database query fails
-pub fn export_memories(
+pub async fn export_memories(
     repo: &MemoryRepo,
     user_id: &str,
     persona_id: &str,
     limit: Option<usize>,
 ) -> Result<ExportResult> {
     let max = limit.unwrap_or(DEFAULT_EXPORT_LIMIT);
-    let memories = repo.get_exportable(user_id, max)?;
+    let memories = repo.get_exportable(user_id, max).await?;
 
     let facts: Vec<LearnedFact> = memories
         .iter()
@@ -96,7 +96,7 @@ pub fn export_memories(
 /// # Errors
 ///
 /// Returns error if JSON parsing or database operations fail
-pub fn import_memories(
+pub async fn import_memories(
     repo: &MemoryRepo,
     user_id: &str,
     content: &str,
@@ -130,7 +130,7 @@ pub fn import_memories(
             let content_hash = Memory::compute_content_hash(&fact.fact);
 
             // Skip duplicates by content hash
-            if repo.exists_by_content_hash(user_id, &content_hash)? {
+            if repo.exists_by_content_hash(user_id, &content_hash).await? {
                 skipped += 1;
                 continue;
             }
@@ -139,7 +139,7 @@ pub fn import_memories(
             let memory = Memory::new(user_id.to_string(), category, fact.fact.clone())
                 .with_source(String::new(), LIFE_JSON_SOURCE.to_string());
 
-            repo.add(&memory)?;
+            repo.add(&memory).await?;
             imported += 1;
         }
     }
@@ -191,24 +191,26 @@ mod tests {
     use super::*;
     use crate::db;
 
-    fn setup() -> (MemoryRepo, String) {
-        let pool = db::init_memory().unwrap();
+    async fn setup() -> (MemoryRepo, String) {
+        let pool = db::init_memory().await.unwrap();
         let repo = MemoryRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool);
-        let user = user_repo.find_or_create("life_json_user").unwrap();
+        let user = user_repo.find_or_create("life_json_user").await.unwrap();
         (repo, user.id)
     }
 
-    #[test]
-    fn test_export_empty() {
-        let (repo, user_id) = setup();
-        let result = export_memories(&repo, &user_id, "orin", None).unwrap();
+    #[tokio::test]
+    async fn test_export_empty() {
+        let (repo, user_id) = setup().await;
+        let result = export_memories(&repo, &user_id, "orin", None)
+            .await
+            .unwrap();
         assert_eq!(result.count, 0);
     }
 
-    #[test]
-    fn test_export_with_memories() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_export_with_memories() {
+        let (repo, user_id) = setup().await;
 
         let m1 = Memory::new(
             user_id.clone(),
@@ -221,10 +223,12 @@ mod tests {
             MemoryCategory::Preference,
             "Dark mode".to_string(),
         );
-        repo.add(&m1).unwrap();
-        repo.add(&m2).unwrap();
+        repo.add(&m1).await.unwrap();
+        repo.add(&m2).await.unwrap();
 
-        let result = export_memories(&repo, &user_id, "orin", None).unwrap();
+        let result = export_memories(&repo, &user_id, "orin", None)
+            .await
+            .unwrap();
         assert_eq!(result.count, 2);
 
         let assistants = result.life_json.assistants.unwrap();
@@ -237,9 +241,9 @@ mod tests {
         assert_eq!(pinned_fact.confidence, Some(1.0));
     }
 
-    #[test]
-    fn test_import_basic() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_import_basic() {
+        let (repo, user_id) = setup().await;
 
         let json = r#"{
             "version": "1.0.0",
@@ -253,18 +257,18 @@ mod tests {
             }
         }"#;
 
-        let result = import_memories(&repo, &user_id, json, None).unwrap();
+        let result = import_memories(&repo, &user_id, json, None).await.unwrap();
         assert_eq!(result.imported, 2);
         assert_eq!(result.skipped, 0);
 
         // Verify memories were created
-        let memories = repo.list(&user_id, None).unwrap();
+        let memories = repo.list(&user_id, None).await.unwrap();
         assert_eq!(memories.len(), 2);
     }
 
-    #[test]
-    fn test_import_dedup() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_import_dedup() {
+        let (repo, user_id) = setup().await;
 
         // Pre-create a memory with same content
         let existing = Memory::new(
@@ -272,7 +276,7 @@ mod tests {
             MemoryCategory::Fact,
             "Prefers Rust".to_string(),
         );
-        repo.add(&existing).unwrap();
+        repo.add(&existing).await.unwrap();
 
         let json = r#"{
             "version": "1.0.0",
@@ -286,14 +290,14 @@ mod tests {
             }
         }"#;
 
-        let result = import_memories(&repo, &user_id, json, None).unwrap();
+        let result = import_memories(&repo, &user_id, json, None).await.unwrap();
         assert_eq!(result.imported, 1);
         assert_eq!(result.skipped, 1);
     }
 
-    #[test]
-    fn test_import_filtered_persona() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_import_filtered_persona() {
+        let (repo, user_id) = setup().await;
 
         let json = r#"{
             "version": "1.0.0",
@@ -307,17 +311,19 @@ mod tests {
             }
         }"#;
 
-        let result = import_memories(&repo, &user_id, json, Some("orin")).unwrap();
+        let result = import_memories(&repo, &user_id, json, Some("orin"))
+            .await
+            .unwrap();
         assert_eq!(result.imported, 1);
 
-        let memories = repo.list(&user_id, None).unwrap();
+        let memories = repo.list(&user_id, None).await.unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].content, "For Orin");
     }
 
-    #[test]
-    fn test_import_source_channel() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_import_source_channel() {
+        let (repo, user_id) = setup().await;
 
         let json = r#"{
             "version": "1.0.0",
@@ -328,15 +334,15 @@ mod tests {
             }
         }"#;
 
-        import_memories(&repo, &user_id, json, None).unwrap();
+        import_memories(&repo, &user_id, json, None).await.unwrap();
 
-        let memories = repo.list(&user_id, None).unwrap();
+        let memories = repo.list(&user_id, None).await.unwrap();
         assert_eq!(memories[0].source_channel.as_deref(), Some("life.json"));
     }
 
-    #[test]
-    fn test_roundtrip() {
-        let (repo, user_id) = setup();
+    #[tokio::test]
+    async fn test_roundtrip() {
+        let (repo, user_id) = setup().await;
 
         // Create memories
         let m1 = Memory::new(
@@ -350,23 +356,27 @@ mod tests {
             MemoryCategory::Preference,
             "Vim user".to_string(),
         );
-        repo.add(&m1).unwrap();
-        repo.add(&m2).unwrap();
+        repo.add(&m1).await.unwrap();
+        repo.add(&m2).await.unwrap();
 
         // Export
-        let export = export_memories(&repo, &user_id, "orin", None).unwrap();
+        let export = export_memories(&repo, &user_id, "orin", None)
+            .await
+            .unwrap();
         let json = serde_json::to_string(&export.life_json).unwrap();
 
         // Import into a fresh database
-        let pool2 = db::init_memory().unwrap();
+        let pool2 = db::init_memory().await.unwrap();
         let repo2 = MemoryRepo::new(pool2.clone());
         let user_repo2 = crate::db::UserRepo::new(pool2);
-        let user2 = user_repo2.find_or_create("roundtrip_user").unwrap();
+        let user2 = user_repo2.find_or_create("roundtrip_user").await.unwrap();
 
-        let import = import_memories(&repo2, &user2.id, &json, Some("orin")).unwrap();
+        let import = import_memories(&repo2, &user2.id, &json, Some("orin"))
+            .await
+            .unwrap();
         assert_eq!(import.imported, 2);
 
-        let memories = repo2.list(&user2.id, None).unwrap();
+        let memories = repo2.list(&user2.id, None).await.unwrap();
         assert_eq!(memories.len(), 2);
     }
 

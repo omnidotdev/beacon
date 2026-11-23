@@ -158,12 +158,10 @@ async fn list_providers(
         vec![]
     };
 
-    let local_configured = state
-        .local_key_store
-        .as_ref()
-        .map_or_else(Vec::new, |store| {
-            store.list_configured().unwrap_or_default()
-        });
+    let local_configured = match state.local_key_store.as_ref() {
+        Some(store) => store.list_configured().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
 
     let preferred_provider = if let Some(ref uid) = user_id {
         if let Some(resolver) = &state.key_resolver {
@@ -413,11 +411,14 @@ async fn configure_provider(
         ));
     };
 
-    match store.set(
-        &body.provider,
-        &body.api_key,
-        body.model_preference.as_deref(),
-    ) {
+    match store
+        .set(
+            &body.provider,
+            &body.api_key,
+            body.model_preference.as_deref(),
+        )
+        .await
+    {
         Ok(()) => {
             tracing::info!(provider = %body.provider, "local provider key configured");
             Ok(Json(ConfigureResponse {
@@ -483,7 +484,7 @@ async fn remove_provider(
         ));
     };
 
-    match store.remove(&provider) {
+    match store.remove(&provider).await {
         Ok(()) => Ok(Json(ConfigureResponse {
             success: true,
             message: format!("{provider} key removed"),

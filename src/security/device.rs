@@ -5,6 +5,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use sqlx::Row;
+use sqlx::any::AnyRow;
+
 use crate::db::DbPool;
 use crate::{Error, Result};
 
@@ -78,6 +81,22 @@ pub struct DeviceManager {
     pool: DbPool,
 }
 
+const DEVICE_COLUMNS: &str = "id, public_key, name, platform, trust_level, paired_at, last_seen";
+
+impl PairedDevice {
+    fn from_row(row: &AnyRow) -> Result<Self> {
+        Ok(Self {
+            id: row.try_get(0)?,
+            public_key: row.try_get(1)?,
+            name: row.try_get(2)?,
+            platform: row.try_get::<Option<String>, _>(3)?,
+            trust_level: TrustLevel::from_str(&row.try_get::<String, _>(4)?),
+            paired_at: parse_datetime(&row.try_get::<String, _>(5)?),
+            last_seen: parse_datetime(&row.try_get::<String, _>(6)?),
+        })
+    }
+}
+
 impl DeviceManager {
     /// Create a new device manager
     #[must_use]
@@ -90,7 +109,7 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails or device already exists
-    pub fn register(
+    pub async fn register(
         &self,
         device_id: &str,
         public_key: &str,
@@ -98,28 +117,23 @@ impl DeviceManager {
         platform: Option<&str>,
         trust_level: TrustLevel,
     ) -> Result<PairedDevice> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
         let now = Utc::now();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO devices (id, public_key, name, platform, trust_level, paired_at, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            [
-                device_id,
-                public_key,
-                name,
-                platform.unwrap_or(""),
-                &trust_level.to_string(),
-                &now.to_rfc3339(),
-                &now.to_rfc3339(),
-            ],
+             VALUES ($1, $2, $3, $4, $5, $6, $6)",
         )
+        .bind(device_id.to_string())
+        .bind(public_key.to_string())
+        .bind(name.to_string())
+        .bind(platform.unwrap_or("").to_string())
+        .bind(trust_level.to_string())
+        .bind(now.to_rfc3339())
+        .execute(self.pool.pool())
+        .await
         .map_err(|e| {
-            if e.to_string().contains("UNIQUE constraint") {
+            if e.as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation) {
                 Error::Auth("device already paired".to_string())
             } else {
                 Error::Database(e.to_string())
@@ -144,34 +158,8 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get(&self, device_id: &str) -> Result<Option<PairedDevice>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let result = conn.query_row(
-            "SELECT id, public_key, name, platform, trust_level, paired_at, last_seen
-             FROM devices WHERE id = ?1",
-            [device_id],
-            |row| {
-                Ok(PairedDevice {
-                    id: row.get(0)?,
-                    public_key: row.get(1)?,
-                    name: row.get(2)?,
-                    platform: row.get::<_, Option<String>>(3)?,
-                    trust_level: TrustLevel::from_str(&row.get::<_, String>(4)?),
-                    paired_at: parse_datetime(&row.get::<_, String>(5)?),
-                    last_seen: parse_datetime(&row.get::<_, String>(6)?),
-                })
-            },
-        );
-
-        match result {
-            Ok(device) => Ok(Some(device)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+    pub async fn get(&self, device_id: &str) -> Result<Option<PairedDevice>> {
+        self.find_by("id", device_id).await
     }
 
     /// Get a device by public key
@@ -179,34 +167,20 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn get_by_public_key(&self, public_key: &str) -> Result<Option<PairedDevice>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn get_by_public_key(&self, public_key: &str) -> Result<Option<PairedDevice>> {
+        self.find_by("public_key", public_key).await
+    }
 
-        let result = conn.query_row(
-            "SELECT id, public_key, name, platform, trust_level, paired_at, last_seen
-             FROM devices WHERE public_key = ?1",
-            [public_key],
-            |row| {
-                Ok(PairedDevice {
-                    id: row.get(0)?,
-                    public_key: row.get(1)?,
-                    name: row.get(2)?,
-                    platform: row.get::<_, Option<String>>(3)?,
-                    trust_level: TrustLevel::from_str(&row.get::<_, String>(4)?),
-                    paired_at: parse_datetime(&row.get::<_, String>(5)?),
-                    last_seen: parse_datetime(&row.get::<_, String>(6)?),
-                })
-            },
-        );
-
-        match result {
-            Ok(device) => Ok(Some(device)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+    async fn find_by(&self, column: &'static str, value: &str) -> Result<Option<PairedDevice>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices WHERE {column} = $1"
+        )))
+        .bind(value.to_string())
+        .fetch_optional(self.pool.pool())
+        .await?
+        .as_ref()
+        .map(PairedDevice::from_row)
+        .transpose()
     }
 
     /// Update last seen timestamp for a device
@@ -214,19 +188,12 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn update_last_seen(&self, device_id: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE devices SET last_seen = ?1 WHERE id = ?2",
-            [&now, device_id],
-        )
-        .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn update_last_seen(&self, device_id: &str) -> Result<()> {
+        sqlx::query("UPDATE devices SET last_seen = $1 WHERE id = $2")
+            .bind(Utc::now().to_rfc3339())
+            .bind(device_id.to_string())
+            .execute(self.pool.pool())
+            .await?;
         Ok(())
     }
 
@@ -235,17 +202,12 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn update_trust_level(&self, device_id: &str, trust_level: TrustLevel) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        conn.execute(
-            "UPDATE devices SET trust_level = ?1 WHERE id = ?2",
-            [&trust_level.to_string(), device_id],
-        )
-        .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn update_trust_level(&self, device_id: &str, trust_level: TrustLevel) -> Result<()> {
+        sqlx::query("UPDATE devices SET trust_level = $1 WHERE id = $2")
+            .bind(trust_level.to_string())
+            .bind(device_id.to_string())
+            .execute(self.pool.pool())
+            .await?;
 
         tracing::info!(device_id, %trust_level, "updated device trust level");
         Ok(())
@@ -256,18 +218,12 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn update_name(&self, device_id: &str, name: &str) -> Result<()> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        conn.execute(
-            "UPDATE devices SET name = ?1 WHERE id = ?2",
-            [name, device_id],
-        )
-        .map_err(|e| Error::Database(e.to_string()))?;
-
+    pub async fn update_name(&self, device_id: &str, name: &str) -> Result<()> {
+        sqlx::query("UPDATE devices SET name = $1 WHERE id = $2")
+            .bind(name.to_string())
+            .bind(device_id.to_string())
+            .execute(self.pool.pool())
+            .await?;
         Ok(())
     }
 
@@ -276,15 +232,12 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn remove(&self, device_id: &str) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let rows = conn
-            .execute("DELETE FROM devices WHERE id = ?1", [device_id])
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn remove(&self, device_id: &str) -> Result<bool> {
+        let rows = sqlx::query("DELETE FROM devices WHERE id = $1")
+            .bind(device_id.to_string())
+            .execute(self.pool.pool())
+            .await?
+            .rows_affected();
 
         if rows > 0 {
             tracing::info!(device_id, "device removed");
@@ -298,36 +251,17 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn list(&self) -> Result<Vec<PairedDevice>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn list(&self) -> Result<Vec<PairedDevice>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices ORDER BY last_seen DESC"
+        )))
+        .fetch_all(self.pool.pool())
+        .await?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, public_key, name, platform, trust_level, paired_at, last_seen
-                 FROM devices ORDER BY last_seen DESC",
-            )
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let devices = stmt
-            .query_map([], |row| {
-                Ok(PairedDevice {
-                    id: row.get(0)?,
-                    public_key: row.get(1)?,
-                    name: row.get(2)?,
-                    platform: row.get::<_, Option<String>>(3)?,
-                    trust_level: TrustLevel::from_str(&row.get::<_, String>(4)?),
-                    paired_at: parse_datetime(&row.get::<_, String>(5)?),
-                    last_seen: parse_datetime(&row.get::<_, String>(6)?),
-                })
-            })
-            .map_err(|e| Error::Database(e.to_string()))?
-            .filter_map(std::result::Result::ok)
-            .collect();
-
-        Ok(devices)
+        Ok(rows
+            .iter()
+            .filter_map(|row| PairedDevice::from_row(row).ok())
+            .collect())
     }
 
     /// Count paired devices
@@ -335,15 +269,10 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn count(&self) -> Result<usize> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn count(&self) -> Result<usize> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices")
+            .fetch_one(self.pool.pool())
+            .await?;
 
         Ok(usize::try_from(count).unwrap_or(0))
     }
@@ -353,19 +282,13 @@ impl DeviceManager {
     /// # Errors
     ///
     /// Returns error if database operation fails
-    pub fn is_paired(&self, device_id: &str) -> Result<bool> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| Error::Database(e.to_string()))?;
+    pub async fn is_paired(&self, device_id: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE id = $1")
+            .bind(device_id.to_string())
+            .fetch_one(self.pool.pool())
+            .await?;
 
-        let exists: bool = conn
-            .query_row("SELECT 1 FROM devices WHERE id = ?1", [device_id], |_| {
-                Ok(true)
-            })
-            .unwrap_or(false);
-
-        Ok(exists)
+        Ok(count > 0)
     }
 }
 
@@ -378,14 +301,14 @@ mod tests {
     use super::*;
     use crate::db::init_memory;
 
-    fn setup() -> DeviceManager {
-        let pool = init_memory().unwrap();
+    async fn setup() -> DeviceManager {
+        let pool = init_memory().await.unwrap();
         DeviceManager::new(pool)
     }
 
-    #[test]
-    fn test_register_device() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_register_device() {
+        let manager = setup().await;
 
         let device = manager
             .register(
@@ -395,6 +318,7 @@ mod tests {
                 Some("linux-x86_64"),
                 TrustLevel::Paired,
             )
+            .await
             .unwrap();
 
         assert_eq!(device.id, "device123");
@@ -402,28 +326,30 @@ mod tests {
         assert_eq!(device.trust_level, TrustLevel::Paired);
     }
 
-    #[test]
-    fn test_get_device() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_get_device() {
+        let manager = setup().await;
 
         manager
             .register("device456", "pk456", "Phone", None, TrustLevel::Trusted)
+            .await
             .unwrap();
 
-        let device = manager.get("device456").unwrap().unwrap();
+        let device = manager.get("device456").await.unwrap().unwrap();
         assert_eq!(device.name, "Phone");
         assert_eq!(device.trust_level, TrustLevel::Trusted);
 
         // Non-existent device
-        assert!(manager.get("nonexistent").unwrap().is_none());
+        assert!(manager.get("nonexistent").await.unwrap().is_none());
     }
 
-    #[test]
-    fn test_duplicate_device_fails() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_duplicate_device_fails() {
+        let manager = setup().await;
 
         manager
             .register("device789", "pk789", "Device 1", None, TrustLevel::Paired)
+            .await
             .unwrap();
 
         // Same ID should fail
@@ -434,7 +360,7 @@ mod tests {
             None,
             TrustLevel::Paired,
         );
-        assert!(result.is_err());
+        assert!(result.await.is_err());
 
         // Same public key should fail
         let result = manager.register(
@@ -444,74 +370,81 @@ mod tests {
             None,
             TrustLevel::Paired,
         );
-        assert!(result.is_err());
+        assert!(result.await.is_err());
     }
 
-    #[test]
-    fn test_update_trust_level() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_update_trust_level() {
+        let manager = setup().await;
 
         manager
             .register("deviceA", "pkA", "Test", None, TrustLevel::Paired)
+            .await
             .unwrap();
 
         manager
             .update_trust_level("deviceA", TrustLevel::Admin)
+            .await
             .unwrap();
 
-        let device = manager.get("deviceA").unwrap().unwrap();
+        let device = manager.get("deviceA").await.unwrap().unwrap();
         assert_eq!(device.trust_level, TrustLevel::Admin);
     }
 
-    #[test]
-    fn test_remove_device() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_remove_device() {
+        let manager = setup().await;
 
         manager
             .register("deviceB", "pkB", "Test", None, TrustLevel::Paired)
+            .await
             .unwrap();
 
-        assert!(manager.is_paired("deviceB").unwrap());
-        assert!(manager.remove("deviceB").unwrap());
-        assert!(!manager.is_paired("deviceB").unwrap());
+        assert!(manager.is_paired("deviceB").await.unwrap());
+        assert!(manager.remove("deviceB").await.unwrap());
+        assert!(!manager.is_paired("deviceB").await.unwrap());
 
         // Removing non-existent device returns false
-        assert!(!manager.remove("nonexistent").unwrap());
+        assert!(!manager.remove("nonexistent").await.unwrap());
     }
 
-    #[test]
-    fn test_list_devices() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_list_devices() {
+        let manager = setup().await;
 
         manager
             .register("d1", "pk1", "Device 1", None, TrustLevel::Paired)
+            .await
             .unwrap();
         manager
             .register("d2", "pk2", "Device 2", None, TrustLevel::Trusted)
+            .await
             .unwrap();
         manager
             .register("d3", "pk3", "Device 3", None, TrustLevel::Admin)
+            .await
             .unwrap();
 
-        let devices = manager.list().unwrap();
+        let devices = manager.list().await.unwrap();
         assert_eq!(devices.len(), 3);
     }
 
-    #[test]
-    fn test_count_devices() {
-        let manager = setup();
+    #[tokio::test]
+    async fn test_count_devices() {
+        let manager = setup().await;
 
-        assert_eq!(manager.count().unwrap(), 0);
+        assert_eq!(manager.count().await.unwrap(), 0);
 
         manager
             .register("d1", "pk1", "Device", None, TrustLevel::Paired)
+            .await
             .unwrap();
 
-        assert_eq!(manager.count().unwrap(), 1);
+        assert_eq!(manager.count().await.unwrap(), 1);
     }
 
-    #[test]
-    fn test_trust_level_parsing() {
+    #[tokio::test]
+    async fn test_trust_level_parsing() {
         assert_eq!(TrustLevel::from_str("paired"), TrustLevel::Paired);
         assert_eq!(TrustLevel::from_str("trusted"), TrustLevel::Trusted);
         assert_eq!(TrustLevel::from_str("admin"), TrustLevel::Admin);

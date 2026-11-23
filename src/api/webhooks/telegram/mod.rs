@@ -206,7 +206,12 @@ async fn handle_update_for_account(
         let chat_id_str = message.chat.id.to_string();
 
         // Check per-group config first, fall back to global
-        let group_config = state.telegram_group_repo.get(&chat_id_str).ok().flatten();
+        let group_config = state
+            .telegram_group_repo
+            .get(&chat_id_str)
+            .await
+            .ok()
+            .flatten();
 
         // If group is explicitly disabled, skip
         if group_config.as_ref().is_some_and(|gc| !gc.enabled) {

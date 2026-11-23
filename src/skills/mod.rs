@@ -555,7 +555,7 @@ pub enum SlashCommandAction {
 /// # Errors
 ///
 /// Returns error if database lookup fails
-pub fn resolve_slash_command(
+pub async fn resolve_slash_command(
     input: &str,
     skill_repo: &crate::db::SkillRepo,
     user_id: Option<&str>,
@@ -577,7 +577,7 @@ pub fn resolve_slash_command(
     }
 
     // Look up in database
-    let skill = skill_repo.get_by_command_name(command, user_id)?;
+    let skill = skill_repo.get_by_command_name(command, user_id).await?;
 
     match skill {
         Some(s) if s.enabled && s.skill.metadata.user_invocable => {
@@ -609,7 +609,7 @@ pub fn resolve_slash_command(
 /// # Errors
 ///
 /// Returns error if database operations fail
-pub fn sync_discovered_skills(
+pub async fn sync_discovered_skills(
     skill_repo: &crate::db::SkillRepo,
     registry: &SkillRegistry,
 ) -> Result<usize> {
@@ -617,13 +617,19 @@ pub fn sync_discovered_skills(
     for skill in registry.skills.values() {
         match skill.source {
             SkillSource::Bundled => {
-                skill_repo.upsert_bundled(skill, SkillPriority::Standard)?;
+                skill_repo
+                    .upsert_bundled(skill, SkillPriority::Standard)
+                    .await?;
                 synced += 1;
             }
             SkillSource::Local | SkillSource::Manifold { .. } | SkillSource::Plugin => {
                 // Only install if not already present
-                if skill_repo.get_by_name(&skill.metadata.name)?.is_none() {
-                    skill_repo.install(skill)?;
+                if skill_repo
+                    .get_by_name(&skill.metadata.name)
+                    .await?
+                    .is_none()
+                {
+                    skill_repo.install(skill).await?;
                     synced += 1;
                 }
             }

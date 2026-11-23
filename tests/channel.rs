@@ -105,20 +105,22 @@ async fn test_mock_channel_send() {
 
 #[tokio::test]
 async fn test_session_persistence() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     // Create user and session
     let user_repo = UserRepo::new(db.clone());
     let session_repo = SessionRepo::new(db);
 
-    let user = user_repo.find_or_create("discord:12345").unwrap();
+    let user = user_repo.find_or_create("discord:12345").await.unwrap();
     let session = session_repo
         .find_or_create(&user.id, "discord", "channel-abc", "orin")
+        .await
         .unwrap();
 
     // Add messages
     session_repo
         .add_message(&session.id, MessageRole::User, "Hello Orin")
+        .await
         .unwrap();
     session_repo
         .add_message(
@@ -126,10 +128,11 @@ async fn test_session_persistence() {
             MessageRole::Assistant,
             "Hello! How can I help?",
         )
+        .await
         .unwrap();
 
     // Retrieve messages
-    let messages = session_repo.get_messages(&session.id, 10).unwrap();
+    let messages = session_repo.get_messages(&session.id, 10).await.unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].content, "Hello Orin");
     assert_eq!(messages[1].content, "Hello! How can I help?");
@@ -137,19 +140,21 @@ async fn test_session_persistence() {
 
 #[tokio::test]
 async fn test_multiple_sessions_per_user() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     let user_repo = UserRepo::new(db.clone());
     let session_repo = SessionRepo::new(db);
 
-    let user = user_repo.find_or_create("user-1").unwrap();
+    let user = user_repo.find_or_create("user-1").await.unwrap();
 
     // Create sessions on different channels
     let discord_session = session_repo
         .find_or_create(&user.id, "discord", "ch-1", "orin")
+        .await
         .unwrap();
     let slack_session = session_repo
         .find_or_create(&user.id, "slack", "ch-2", "orin")
+        .await
         .unwrap();
 
     assert_ne!(discord_session.id, slack_session.id);
@@ -157,6 +162,7 @@ async fn test_multiple_sessions_per_user() {
     // Same channel/channel_id should return same session
     let same_session = session_repo
         .find_or_create(&user.id, "discord", "ch-1", "orin")
+        .await
         .unwrap();
     assert_eq!(discord_session.id, same_session.id);
 }
@@ -193,12 +199,12 @@ async fn test_tool_policy_channel_filtering() {
 
 #[tokio::test]
 async fn test_memory_storage_and_retrieval() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     let user_repo = UserRepo::new(db.clone());
     let memory_repo = MemoryRepo::new(db);
 
-    let user = user_repo.find_or_create("test-user").unwrap();
+    let user = user_repo.find_or_create("test-user").await.unwrap();
 
     // Create and store a memory
     let memory = Memory::new(
@@ -206,10 +212,10 @@ async fn test_memory_storage_and_retrieval() {
         MemoryCategory::Preference,
         "User's favorite color is blue".to_string(),
     );
-    memory_repo.add(&memory).unwrap();
+    memory_repo.add(&memory).await.unwrap();
 
     // Retrieve memories
-    let memories = memory_repo.list(&user.id, None).unwrap();
+    let memories = memory_repo.list(&user.id, None).await.unwrap();
     assert_eq!(memories.len(), 1);
     assert_eq!(memories[0].content, "User's favorite color is blue");
     assert_eq!(memories[0].category, MemoryCategory::Preference);
@@ -217,12 +223,12 @@ async fn test_memory_storage_and_retrieval() {
 
 #[tokio::test]
 async fn test_memory_search() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     let user_repo = UserRepo::new(db.clone());
     let memory_repo = MemoryRepo::new(db);
 
-    let user = user_repo.find_or_create("search-user").unwrap();
+    let user = user_repo.find_or_create("search-user").await.unwrap();
 
     // Add multiple memories
     let m1 = Memory::new(
@@ -241,17 +247,17 @@ async fn test_memory_search() {
         "Likes coffee".to_string(),
     );
 
-    memory_repo.add(&m1).unwrap();
-    memory_repo.add(&m2).unwrap();
-    memory_repo.add(&m3).unwrap();
+    memory_repo.add(&m1).await.unwrap();
+    memory_repo.add(&m2).await.unwrap();
+    memory_repo.add(&m3).await.unwrap();
 
     // Search for specific content
-    let results = memory_repo.search(&user.id, "dark").unwrap();
+    let results = memory_repo.search(&user.id, "dark").await.unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].content.contains("dark mode"));
 
     // Search that matches nothing
-    let empty = memory_repo.search(&user.id, "xyz123").unwrap();
+    let empty = memory_repo.search(&user.id, "xyz123").await.unwrap();
     assert!(empty.is_empty());
 }
 
@@ -293,10 +299,10 @@ async fn test_channel_registry() {
 
 #[tokio::test]
 async fn test_user_life_json_path() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     let user_repo = UserRepo::new(db);
-    let user = user_repo.find_or_create("life-json-user").unwrap();
+    let user = user_repo.find_or_create("life-json-user").await.unwrap();
 
     // Initially no life.json path
     assert!(user.life_json_path.is_none());
@@ -304,29 +310,30 @@ async fn test_user_life_json_path() {
     // Set life.json path
     user_repo
         .set_life_json_path(&user.id, Some("/home/user/life.json"))
+        .await
         .unwrap();
 
     // Verify it's set
-    let updated = user_repo.find(&user.id).unwrap().unwrap();
+    let updated = user_repo.find(&user.id).await.unwrap().unwrap();
     assert_eq!(
         updated.life_json_path.as_deref(),
         Some("/home/user/life.json")
     );
 
     // Clear it
-    user_repo.set_life_json_path(&user.id, None).unwrap();
-    let cleared = user_repo.find(&user.id).unwrap().unwrap();
+    user_repo.set_life_json_path(&user.id, None).await.unwrap();
+    let cleared = user_repo.find(&user.id).await.unwrap().unwrap();
     assert!(cleared.life_json_path.is_none());
 }
 
 #[tokio::test]
 async fn test_pinned_memories_come_first() {
-    let db = setup_test_db();
+    let db = setup_test_db().await;
 
     let user_repo = UserRepo::new(db.clone());
     let memory_repo = MemoryRepo::new(db);
 
-    let user = user_repo.find_or_create("pinned-test-user").unwrap();
+    let user = user_repo.find_or_create("pinned-test-user").await.unwrap();
 
     // Add an unpinned memory first
     let m1 = Memory::new(
@@ -334,7 +341,7 @@ async fn test_pinned_memories_come_first() {
         MemoryCategory::General,
         "Unpinned memory".to_string(),
     );
-    memory_repo.add(&m1).unwrap();
+    memory_repo.add(&m1).await.unwrap();
 
     // Add a pinned memory second
     let m2 = Memory::new(
@@ -343,10 +350,10 @@ async fn test_pinned_memories_come_first() {
         "Pinned memory".to_string(),
     )
     .pinned();
-    memory_repo.add(&m2).unwrap();
+    memory_repo.add(&m2).await.unwrap();
 
     // Get context - pinned should come first
-    let context = memory_repo.get_context(&user.id, 10).unwrap();
+    let context = memory_repo.get_context(&user.id, 10).await.unwrap();
     assert_eq!(context.len(), 2);
     assert!(context[0].pinned);
     assert!(!context[1].pinned);

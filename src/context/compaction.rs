@@ -106,7 +106,7 @@ impl SessionCompactor {
         user_id: &str,
     ) -> Result<CompactionResult> {
         // Fetch all messages for the session
-        let messages = session_repo.get_messages(session_id, 1000)?;
+        let messages = session_repo.get_messages(session_id, 1000).await?;
 
         if messages.len() <= self.config.max_messages_before_compact {
             return Ok(CompactionResult {
@@ -201,9 +201,13 @@ impl SessionCompactor {
         }
 
         // Delete summarized messages and insert summary
-        let messages_removed = session_repo.delete_messages_before(session_id, cutoff_id)?;
+        let messages_removed = session_repo
+            .delete_messages_before(session_id, cutoff_id)
+            .await?;
         let summary_header = format!("[Conversation summary]\n{summary_text}");
-        session_repo.insert_summary(session_id, &summary_header)?;
+        session_repo
+            .insert_summary(session_id, &summary_header)
+            .await?;
 
         tracing::info!(
             session = session_id,
@@ -251,46 +255,51 @@ mod tests {
         assert!(compactor.needs_compaction(100));
     }
 
-    #[test]
-    fn delete_messages_removes_old() {
-        let pool = crate::db::init_memory().unwrap();
+    #[tokio::test]
+    async fn delete_messages_removes_old() {
+        let pool = crate::db::init_memory().await.unwrap();
         let session_repo = SessionRepo::new(pool.clone());
 
         // Create user and session
-        let conn = pool.get().unwrap();
-        conn.execute("INSERT INTO users (id) VALUES ('compact-user')", [])
+        sqlx::query("INSERT INTO users (id) VALUES ('compact-user')")
+            .execute(pool.pool())
+            .await
             .unwrap();
-        drop(conn);
 
         let session = session_repo
             .find_or_create("compact-user", "test", "compact-chan", "orin")
+            .await
             .unwrap();
 
         // Add messages with small delays
         let _m1 = session_repo
             .add_message(&session.id, crate::db::MessageRole::User, "First")
+            .await
             .unwrap();
         let _m2 = session_repo
             .add_message(&session.id, crate::db::MessageRole::Assistant, "Second")
+            .await
             .unwrap();
         let m3 = session_repo
             .add_message(&session.id, crate::db::MessageRole::User, "Third")
+            .await
             .unwrap();
 
         // Delete before m1 should delete nothing (m1 is the earliest)
         // We need a message that is after some others
-        let count = session_repo.message_count(&session.id).unwrap();
+        let count = session_repo.message_count(&session.id).await.unwrap();
         assert_eq!(count, 3);
 
         // Delete messages before the third message
         let deleted = session_repo
             .delete_messages_before(&session.id, &m3.id)
+            .await
             .unwrap();
         // m1 and m2 should be deleted (created_at < m3.created_at)
         assert!(deleted >= 1, "expected at least 1 deleted, got {deleted}");
 
         // Verify remaining messages
-        let remaining = session_repo.get_messages(&session.id, 10).unwrap();
+        let remaining = session_repo.get_messages(&session.id, 10).await.unwrap();
         // At least the third message should remain
         assert!(
             remaining.iter().any(|m| m.content == "Third"),
@@ -298,33 +307,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn insert_summary_adds_system_message() {
-        let pool = crate::db::init_memory().unwrap();
+    #[tokio::test]
+    async fn insert_summary_adds_system_message() {
+        let pool = crate::db::init_memory().await.unwrap();
         let session_repo = SessionRepo::new(pool.clone());
 
-        let conn = pool.get().unwrap();
-        conn.execute("INSERT INTO users (id) VALUES ('summary-user')", [])
+        sqlx::query("INSERT INTO users (id) VALUES ('summary-user')")
+            .execute(pool.pool())
+            .await
             .unwrap();
-        drop(conn);
 
         let session = session_repo
             .find_or_create("summary-user", "test", "summary-chan", "orin")
+            .await
             .unwrap();
 
         session_repo
             .add_message(&session.id, crate::db::MessageRole::User, "Hello")
+            .await
             .unwrap();
 
         let summary = session_repo
             .insert_summary(&session.id, "Summary of prior conversation")
+            .await
             .unwrap();
 
         assert_eq!(summary.role, crate::db::MessageRole::System);
         assert!(summary.content.contains("Summary of prior conversation"));
 
         // Summary should appear before the user message
-        let messages = session_repo.get_messages(&session.id, 10).unwrap();
+        let messages = session_repo.get_messages(&session.id, 10).await.unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, crate::db::MessageRole::System);
         assert_eq!(messages[1].role, crate::db::MessageRole::User);

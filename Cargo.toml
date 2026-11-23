@@ -73,10 +73,16 @@ futures = "0.3"
 async-trait = "0.1"
 tokio-stream = "0.1"
 
-# Database
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
-r2d2 = "0.8"
-r2d2_sqlite = "0.25"
+# Database: one async storage layer over SQLite (self-hosted, a single local
+# file) and Postgres (cloud), selected by URL through sqlx's Any driver
+sqlx = { version = "=0.9.0", default-features = false, features = [
+    "runtime-tokio",
+    "any",
+    "sqlite",
+    "postgres",
+] }
+# Same native SQLite sqlx links, for registering sqlite-vec
+libsqlite3-sys = ">=0.30.1, <0.38.0"
 
 # Vector search
 sqlite-vec = "0.1"

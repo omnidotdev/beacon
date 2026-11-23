@@ -247,14 +247,15 @@ pub async fn memory_ai_for(
 
 /// React to a gateway refusal on a managed request: a rejected key is
 /// dropped so the next request provisions a fresh one
-pub fn note_gateway_failure(state: &ApiState, user_id: &str, failure: GatewayFailure) {
-    if failure == GatewayFailure::Unauthorized
-        && let Some(provisioner) = &state.key_provisioner
-        && let Some(entity) = state
-            .billing_state
-            .as_ref()
-            .and_then(|billing| billing.workspaces.entity_for(user_id))
-    {
+pub async fn note_gateway_failure(state: &ApiState, user_id: &str, failure: GatewayFailure) {
+    if failure != GatewayFailure::Unauthorized {
+        return;
+    }
+    let (Some(provisioner), Some(billing)) = (&state.key_provisioner, state.billing_state.as_ref())
+    else {
+        return;
+    };
+    if let Some(entity) = billing.workspaces.entity_for(user_id).await {
         provisioner.invalidate(user_id, &entity);
     }
 }
@@ -264,13 +265,13 @@ mod tests {
     use super::*;
     use crate::providers::provisioner::BillingEntityType;
 
-    #[test]
-    fn beacon_bills_only_the_personal_workspace() {
+    #[tokio::test]
+    async fn beacon_bills_only_the_personal_workspace() {
         let resolver = crate::billing::WorkspaceResolver::new(None);
-        assert_eq!(resolver.entity_for("u-1"), None);
+        assert_eq!(resolver.entity_for("u-1").await, None);
 
-        resolver.remember("u-1", "ws-1");
-        let known = resolver.entity_for("u-1").unwrap();
+        resolver.remember("u-1", "ws-1").await;
+        let known = resolver.entity_for("u-1").await.unwrap();
         assert_eq!(known.entity_type, BillingEntityType::Organization);
         assert_eq!(known.entity_id, "ws-1");
     }

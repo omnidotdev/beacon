@@ -80,7 +80,8 @@ pub async fn run_harness_turn(
     let stored_session_id = match config.session_mode {
         SessionMode::Resume => {
             deps.harness_session_repo
-                .get_session_id(agent_id.as_str(), channel, channel_id)?
+                .get_session_id(agent_id.as_str(), channel, channel_id)
+                .await?
         }
         SessionMode::Fresh => None,
     };
@@ -105,7 +106,8 @@ pub async fn run_harness_turn(
                 "harness session may be stale, retrying fresh"
             );
             deps.harness_session_repo
-                .delete_session(agent_id.as_str(), channel, channel_id)?;
+                .delete_session(agent_id.as_str(), channel, channel_id)
+                .await?;
             adapter.execute(prompt, config, None).await?
         }
         other => other?,
@@ -113,13 +115,9 @@ pub async fn run_harness_turn(
 
     // Persist session ID
     if let Some(ref sid) = output.session_id {
-        deps.harness_session_repo.upsert_session_id(
-            agent_id.as_str(),
-            channel,
-            channel_id,
-            sid,
-            &config.adapter,
-        )?;
+        deps.harness_session_repo
+            .upsert_session_id(agent_id.as_str(), channel, channel_id, sid, &config.adapter)
+            .await?;
     }
 
     // Record usage
@@ -131,15 +129,17 @@ pub async fn run_harness_turn(
         let (input_tokens, output_tokens) = (usage.input_tokens as u32, usage.output_tokens as u32);
 
         if let Some(usage_repo) = deps.usage_repo
-            && let Err(e) = usage_repo.record(
-                session_id,
-                agent_id.as_str(),
-                model,
-                provider,
-                input_tokens,
-                output_tokens,
-                usage.cost_usd,
-            )
+            && let Err(e) = usage_repo
+                .record(
+                    session_id,
+                    agent_id.as_str(),
+                    model,
+                    provider,
+                    input_tokens,
+                    output_tokens,
+                    usage.cost_usd,
+                )
+                .await
         {
             tracing::warn!(error = %e, "failed to record harness usage");
         }
@@ -147,12 +147,15 @@ pub async fn run_harness_turn(
 
     // Store messages in session history
     deps.session_repo
-        .add_message(session_id, crate::db::MessageRole::User, prompt)?;
-    deps.session_repo.add_message(
-        session_id,
-        crate::db::MessageRole::Assistant,
-        &output.response,
-    )?;
+        .add_message(session_id, crate::db::MessageRole::User, prompt)
+        .await?;
+    deps.session_repo
+        .add_message(
+            session_id,
+            crate::db::MessageRole::Assistant,
+            &output.response,
+        )
+        .await?;
 
     Ok(output.response)
 }

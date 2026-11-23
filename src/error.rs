@@ -76,9 +76,9 @@ pub enum Error {
     #[error("database error: {0}")]
     Database(String),
 
-    /// `SQLite` error
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    /// SQL storage error (`SQLite` or Postgres)
+    #[error("database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
 
     /// Skill error
     #[error("skill error: {0}")]

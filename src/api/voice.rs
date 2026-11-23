@@ -80,21 +80,21 @@ async fn voice_client(
 }
 
 /// Map a failed speech call, giving gateway refusals their own outcome
-fn speech_failure(
+async fn speech_failure(
     state: &ApiState,
     user_id: Option<&str>,
     error_text: String,
     fallback: fn(String) -> VoiceError,
 ) -> VoiceError {
-    gateway_error::classify(&error_text).map_or_else(
-        || fallback(error_text),
-        |failure| {
+    match gateway_error::classify(&error_text) {
+        Some(failure) => {
             if let Some(user_id) = user_id {
-                managed::note_gateway_failure(state, user_id, failure);
+                managed::note_gateway_failure(state, user_id, failure).await;
             }
             VoiceError::Gateway(failure)
-        },
-    )
+        }
+        None => fallback(error_text),
+    }
 }
 
 /// Upload filename for audio of the given `Content-Type`
@@ -144,17 +144,19 @@ async fn transcribe(
             .and_then(|value| value.to_str().ok()),
     );
 
-    let transcription = synapse
-        .transcribe(body, filename, &state.stt_model)
-        .await
-        .map_err(|e| {
-            speech_failure(
+    let transcription = synapse.transcribe(body, filename, &state.stt_model).await;
+    let transcription = match transcription {
+        Ok(transcription) => transcription,
+        Err(e) => {
+            return Err(speech_failure(
                 &state,
                 user_id.as_deref(),
                 e.to_string(),
                 VoiceError::TranscriptionFailed,
             )
-        })?;
+            .await);
+        }
+    };
 
     Ok(Json(TranscribeResponse {
         text: transcription.text,
@@ -190,14 +192,18 @@ async fn synthesize(
         speed: Some(state.tts_speed),
     };
 
-    let audio = synapse.synthesize(&speech_request).await.map_err(|e| {
-        speech_failure(
-            &state,
-            user_id.as_deref(),
-            e.to_string(),
-            VoiceError::SynthesisFailed,
-        )
-    })?;
+    let audio = match synapse.synthesize(&speech_request).await {
+        Ok(audio) => audio,
+        Err(e) => {
+            return Err(speech_failure(
+                &state,
+                user_id.as_deref(),
+                e.to_string(),
+                VoiceError::SynthesisFailed,
+            )
+            .await);
+        }
+    };
 
     Ok((
         StatusCode::OK,
