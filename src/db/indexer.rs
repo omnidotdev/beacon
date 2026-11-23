@@ -288,6 +288,8 @@ mod tests {
         let pool = crate::db::init_memory().unwrap();
         let memory_repo = MemoryRepo::new(pool);
         let indexer = Indexer::new(memory_repo);
+        // The clone is the point: Indexer must stay Clone
+        #[allow(clippy::redundant_clone)]
         let _cloned = indexer.clone();
     }
 

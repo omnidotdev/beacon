@@ -261,11 +261,11 @@ mod tests {
             &self.id
         }
 
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "Mock Extension"
         }
 
-        fn version(&self) -> &str {
+        fn version(&self) -> &'static str {
             "1.0.0"
         }
 

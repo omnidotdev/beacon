@@ -337,13 +337,7 @@ async fn list_models(
 
     let key = super::managed::managed_gateway_key(&state, &user_id)
         .await
-        .map_err(|e| {
-            let status = match e {
-                super::managed::ManagedError::Denied => StatusCode::FORBIDDEN,
-                super::managed::ManagedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            };
-            models_error(status, e.code(), &e.user_message())
-        })?;
+        .map_err(|e| models_error(e.status(), e.code(), &e.user_message()))?;
 
     let base_url = super::managed::synapse_base_url(&state);
     let models = fetch_gateway_models(&base_url, &key).await.map_err(|e| {

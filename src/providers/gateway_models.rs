@@ -289,7 +289,7 @@ mod tests {
             response.default_model.as_deref(),
             Some("anthropic/claude-sonnet-5-5")
         );
-        assert!(response.models.iter().filter(|m| m.default).count() == 1);
+        assert_eq!(response.models.iter().filter(|m| m.default).count(), 1);
     }
 
     #[test]

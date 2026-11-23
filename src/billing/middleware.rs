@@ -14,8 +14,9 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use super::{BillingState, CachedEntitlement, CachedUsage, FailMode};
+use super::{BillingState, CachedEntitlement, CachedUsage, FailMode, WorkspaceError};
 use crate::api::jwt::JwksCache;
+use crate::api::managed::REAUTH_MESSAGE;
 
 const FEATURE_KEY_API_ACCESS: &str = "api_access";
 const FEATURE_KEY_VOICE_ENABLED: &str = "voice_enabled";
@@ -33,9 +34,11 @@ fn extract_bearer(req: &Request) -> Option<String> {
 /// Enforce Aether entitlements.
 ///
 /// 1. Extracts and validates the Bearer JWT.
-/// 2. Checks `api_access` entitlement → 403 if denied.
-/// 3. Checks `voice_enabled` for voice endpoints → 403 if denied.
-/// 4. Passes through if all checks pass.
+/// 2. Resolves the personal workspace the user's usage bills → 401 when the
+///    token names none (the user signs in again).
+/// 3. Checks `api_access` entitlement → 403 if denied.
+/// 4. Checks `voice_enabled` for voice endpoints → 403 if denied.
+/// 5. Passes through if all checks pass.
 ///
 /// Skips checks when:
 /// - No Authorization header is present (unauthenticated route)
@@ -72,8 +75,29 @@ pub async fn billing_middleware(
     };
 
     // Entitlements belong to the workspace the user's usage bills (their
-    // personal workspace), learned here from their own token
-    let entity = billing.workspaces.resolve(&sub, &token).await;
+    // personal workspace), learned here from their own token. The user entity
+    // is never checked instead: a token without the personal workspace must
+    // sign in again, and a failed lookup follows the fail mode
+    let entity = match billing.workspaces.resolve(&sub, &token).await {
+        Ok(entity) => entity,
+        Err(WorkspaceError::ReauthRequired) => {
+            return (StatusCode::UNAUTHORIZED, REAUTH_MESSAGE).into_response();
+        }
+        Err(WorkspaceError::Unavailable) => {
+            return match billing.fail_mode {
+                FailMode::Open => {
+                    // Managed AI still fails closed until the workspace is known
+                    tracing::warn!("personal workspace unavailable, allowing through (fail-open)");
+                    next.run(request).await
+                }
+                FailMode::Closed => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "billing service unavailable",
+                )
+                    .into_response(),
+            };
+        }
+    };
     let entity_type = entity.kind();
     let entity_id = entity.entity_id.as_str();
 

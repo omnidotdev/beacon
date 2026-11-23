@@ -193,14 +193,16 @@ mod tests {
 
     #[test]
     fn extracts_basic_content() {
-        let html = r#"<html><head><title>Test Page</title></head>
-        <body><article><p>Hello world. This is content.</p></article></body></html>"#;
+        let html = r"<html><head><title>Test Page</title></head>
+        <body><article><p>Hello world. This is content.</p></article></body></html>";
         let result = extract_content("https://example.com", html, 4000);
         assert_eq!(result.title.as_deref(), Some("Test Page"));
         assert!(result.text.contains("Hello world"));
     }
 
     #[test]
+    // The braces are CSS in the fixture, not a format argument
+    #[allow(clippy::literal_string_with_formatting_args)]
     fn skips_scripts_and_styles() {
         let html = r"<html><body>
         <script>alert('xss')</script>

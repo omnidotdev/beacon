@@ -158,7 +158,7 @@ tar = "0.4"
 flate2 = "1"
 
 [dev-dependencies]
-cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 tokio-test = "0.4"
 
 [profile.release]
@@ -179,3 +179,6 @@ cargo = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 cargo_common_metadata = "allow"
+# `assert!(x.is_empty())` reads better in tests than the suggested
+# `assert_eq!(x, [] as [T; 0])`, and Beacon asserts nothing outside tests
+assert_is_empty = "allow"

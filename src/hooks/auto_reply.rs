@@ -173,7 +173,7 @@ mod tests {
             thread_id: None,
             session_id: None,
             response: None,
-            context: Default::default(),
+            context: std::collections::HashMap::default(),
         }
     }
 

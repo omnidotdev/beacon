@@ -80,13 +80,13 @@ pub fn tier_name(entitlements: &EntitlementsResponse) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn response(entries: serde_json::Value) -> EntitlementsResponse {
-        serde_json::from_value(serde_json::json!({ "entitlements": entries })).unwrap()
+    fn response(entries: &serde_json::Value) -> EntitlementsResponse {
+        serde_json::from_value(serde_json::json!({ "entitlements": entries.clone() })).unwrap()
     }
 
     #[test]
     fn free_tier_defers_to_the_gateway_default() {
-        let r = response(serde_json::json!([{ "featureKey": "tier", "value": "free" }]));
+        let r = response(&serde_json::json!([{ "featureKey": "tier", "value": "free" }]));
         let tier = tier_from_entitlements(&r);
         assert_eq!(tier, PlanTier::Free);
         assert_eq!(tier.default_model("anthropic/claude-sonnet-5-5"), "auto");
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn paid_tiers_keep_the_configured_default() {
         for value in ["pro", "\"team\"", "Pro"] {
-            let r = response(serde_json::json!([
+            let r = response(&serde_json::json!([
                 { "featureKey": "api_access", "value": "true" },
                 { "featureKey": "tier", "value": value }
             ]));
@@ -110,13 +110,13 @@ mod tests {
 
     #[test]
     fn tier_name_reads_every_wire_shape() {
-        let plain = response(serde_json::json!([{ "featureKey": "tier", "value": "Pro" }]));
+        let plain = response(&serde_json::json!([{ "featureKey": "tier", "value": "Pro" }]));
         assert_eq!(tier_name(&plain).as_deref(), Some("pro"));
 
-        let quoted = response(serde_json::json!([{ "featureKey": "tier", "value": "\"team\"" }]));
+        let quoted = response(&serde_json::json!([{ "featureKey": "tier", "value": "\"team\"" }]));
         assert_eq!(tier_name(&quoted).as_deref(), Some("team"));
 
-        assert_eq!(tier_name(&response(serde_json::json!([]))), None);
+        assert_eq!(tier_name(&response(&serde_json::json!([]))), None);
     }
 
     #[test]
@@ -137,7 +137,7 @@ mod tests {
                 { "featureKey": "tier", "value": "pro" }
             ]),
         ] {
-            let r = response(limits);
+            let r = response(&limits);
             assert_eq!(tier_name(&r).as_deref(), Some("pro"));
             assert_eq!(tier_from_entitlements(&r), PlanTier::Paid);
         }
@@ -145,17 +145,17 @@ mod tests {
 
     #[test]
     fn jsonb_quoted_free_is_free() {
-        let r = response(serde_json::json!([{ "featureKey": "tier", "value": "\"free\"" }]));
+        let r = response(&serde_json::json!([{ "featureKey": "tier", "value": "\"free\"" }]));
         assert_eq!(tier_from_entitlements(&r), PlanTier::Free);
     }
 
     #[test]
     fn missing_or_null_tier_is_free() {
         assert_eq!(
-            tier_from_entitlements(&response(serde_json::json!([]))),
+            tier_from_entitlements(&response(&serde_json::json!([]))),
             PlanTier::Free
         );
-        let r = response(serde_json::json!([{ "featureKey": "tier", "value": null }]));
+        let r = response(&serde_json::json!([{ "featureKey": "tier", "value": null }]));
         assert_eq!(tier_from_entitlements(&r), PlanTier::Free);
     }
 }

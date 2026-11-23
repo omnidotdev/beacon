@@ -267,13 +267,13 @@ mod tests {
             .unwrap();
 
         // Add messages with small delays
-        let m1 = session_repo
+        let _m1 = session_repo
             .add_message(&session.id, crate::db::MessageRole::User, "First")
             .unwrap();
         let _m2 = session_repo
             .add_message(&session.id, crate::db::MessageRole::Assistant, "Second")
             .unwrap();
-        let _m3 = session_repo
+        let m3 = session_repo
             .add_message(&session.id, crate::db::MessageRole::User, "Third")
             .unwrap();
 
@@ -284,7 +284,7 @@ mod tests {
 
         // Delete messages before the third message
         let deleted = session_repo
-            .delete_messages_before(&session.id, &_m3.id)
+            .delete_messages_before(&session.id, &m3.id)
             .unwrap();
         // m1 and m2 should be deleted (created_at < m3.created_at)
         assert!(deleted >= 1, "expected at least 1 deleted, got {deleted}");

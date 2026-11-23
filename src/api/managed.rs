@@ -2,14 +2,17 @@
 //!
 //! Every managed request runs on the user's product-scoped key, so the
 //! Synapse gateway checks and charges credits against Beacon's Aether app and
-//! the user's pooled Omni balance. There is no shared-key fallback: when a key
-//! cannot be provisioned the AI feature is unavailable
+//! the pooled AI credit balance of the user's personal workspace. There is no
+//! shared-key fallback and no user-entity fallback: when a key cannot be
+//! provisioned, or the workspace to bill is unknown, the AI feature is
+//! unavailable
 
 use std::sync::Arc;
 
 use synapse_client::SynapseClient;
 
 use super::ApiState;
+use crate::billing::WorkspaceError;
 use crate::billing::gateway_error::{
     self, CODE_AI_UNAVAILABLE, GatewayFailure, UNAVAILABLE_MESSAGE,
 };
@@ -18,6 +21,13 @@ use crate::providers::provisioner::{BillingEntity, ProvisionError};
 
 /// Error code when the account lacks the `api_access` entitlement
 pub const CODE_ACCESS_DENIED: &str = "access_denied";
+
+/// Error code when the user must sign in again so their personal workspace
+/// (the billing scope) is known
+pub const CODE_REAUTH_REQUIRED: &str = "reauth_required";
+
+/// User-facing copy when the user must sign in again
+pub const REAUTH_MESSAGE: &str = "Sign in to Beacon again to keep using AI.";
 
 /// A user's managed client plus the plan-based default model
 pub struct ManagedClient {
@@ -32,6 +42,8 @@ pub struct ManagedClient {
 pub enum ManagedError {
     /// The account lacks managed AI access
     Denied,
+    /// The personal workspace to bill is unknown: the user must sign in again
+    ReauthRequired,
     /// Provisioning failed or is not configured
     Unavailable,
 }
@@ -42,6 +54,7 @@ impl ManagedError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Denied => CODE_ACCESS_DENIED,
+            Self::ReauthRequired => CODE_REAUTH_REQUIRED,
             Self::Unavailable => CODE_AI_UNAVAILABLE,
         }
     }
@@ -54,7 +67,27 @@ impl ManagedError {
                 "Your plan doesn't include Beacon AI access. Upgrade to keep going: {}",
                 gateway_error::billing_url()
             ),
+            Self::ReauthRequired => REAUTH_MESSAGE.to_string(),
             Self::Unavailable => UNAVAILABLE_MESSAGE.to_string(),
+        }
+    }
+
+    /// HTTP status for this failure
+    #[must_use]
+    pub const fn status(self) -> axum::http::StatusCode {
+        match self {
+            Self::Denied => axum::http::StatusCode::FORBIDDEN,
+            Self::ReauthRequired => axum::http::StatusCode::UNAUTHORIZED,
+            Self::Unavailable => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+impl From<WorkspaceError> for ManagedError {
+    fn from(error: WorkspaceError) -> Self {
+        match error {
+            WorkspaceError::ReauthRequired => Self::ReauthRequired,
+            WorkspaceError::Unavailable => Self::Unavailable,
         }
     }
 }
@@ -62,15 +95,32 @@ impl ManagedError {
 /// The entity Beacon bills for a user's managed AI.
 ///
 /// Omni bills workspaces, and a user's personal workspace stands in for the
-/// individual, so the personal workspace pays (its plan's entitlements and
-/// included credits apply). Until it is known (no signed-in request yet, or
-/// billing is off) the user's own account pays
-#[must_use]
-pub fn billing_entity_for(state: &ApiState, user_id: &str) -> BillingEntity {
-    state.billing_state.as_ref().map_or_else(
-        || BillingEntity::user(user_id),
-        |billing| billing.workspaces.entity_for(user_id),
-    )
+/// individual, so the personal workspace pays (its plan's entitlements,
+/// included credits, and card-verified free allowance apply). The user entity
+/// is never billed: the workspace comes from cache or, when none is cached
+/// (e.g. after a restart), from Gatekeeper's server-side lookup by user id.
+/// Without billing configured managed AI is unavailable
+///
+/// # Errors
+///
+/// Returns [`ManagedError::ReauthRequired`] when Gatekeeper knows no personal
+/// workspace for the user (or no lookup is configured and none is cached), and
+/// [`ManagedError::Unavailable`] when billing is not configured or the lookup
+/// itself fails
+pub async fn billing_entity_for(
+    state: &ApiState,
+    user_id: &str,
+) -> Result<BillingEntity, ManagedError> {
+    let Some(billing) = &state.billing_state else {
+        tracing::warn!(user_id = %user_id, "managed AI requested but billing is not configured");
+        return Err(ManagedError::Unavailable);
+    };
+
+    billing
+        .workspaces
+        .resolve_user(user_id)
+        .await
+        .map_err(ManagedError::from)
 }
 
 /// Base URL of the Synapse gateway managed requests go to
@@ -95,7 +145,7 @@ pub async fn managed_gateway_key(
         return Err(ManagedError::Unavailable);
     };
 
-    let entity = billing_entity_for(state, user_id);
+    let entity = billing_entity_for(state, user_id).await?;
     provisioner
         .managed_key(user_id, &entity)
         .await
@@ -200,8 +250,12 @@ pub async fn memory_ai_for(
 pub fn note_gateway_failure(state: &ApiState, user_id: &str, failure: GatewayFailure) {
     if failure == GatewayFailure::Unauthorized
         && let Some(provisioner) = &state.key_provisioner
+        && let Some(entity) = state
+            .billing_state
+            .as_ref()
+            .and_then(|billing| billing.workspaces.entity_for(user_id))
     {
-        provisioner.invalidate(user_id, &billing_entity_for(state, user_id));
+        provisioner.invalidate(user_id, &entity);
     }
 }
 
@@ -211,16 +265,36 @@ mod tests {
     use crate::providers::provisioner::BillingEntityType;
 
     #[test]
-    fn beacon_bills_the_personal_workspace_once_known() {
+    fn beacon_bills_only_the_personal_workspace() {
         let resolver = crate::billing::WorkspaceResolver::new(None);
-        let unknown = resolver.entity_for("u-1");
-        assert_eq!(unknown.entity_type, BillingEntityType::User);
-        assert_eq!(unknown.entity_id, "u-1");
+        assert_eq!(resolver.entity_for("u-1"), None);
 
         resolver.remember("u-1", "ws-1");
-        let known = resolver.entity_for("u-1");
+        let known = resolver.entity_for("u-1").unwrap();
         assert_eq!(known.entity_type, BillingEntityType::Organization);
         assert_eq!(known.entity_id, "ws-1");
+    }
+
+    #[test]
+    fn an_unknown_workspace_asks_for_a_new_sign_in() {
+        assert_eq!(
+            ManagedError::from(WorkspaceError::ReauthRequired),
+            ManagedError::ReauthRequired
+        );
+        assert_eq!(
+            ManagedError::from(WorkspaceError::Unavailable),
+            ManagedError::Unavailable
+        );
+        assert_eq!(ManagedError::ReauthRequired.code(), "reauth_required");
+        assert_eq!(
+            ManagedError::ReauthRequired.status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            ManagedError::ReauthRequired
+                .user_message()
+                .contains("Sign in")
+        );
     }
 
     #[test]

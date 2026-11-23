@@ -255,7 +255,7 @@ async fn test_admin_session_messages() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/admin/sessions/{}/messages", session.id))
+                .uri(format!("/api/admin/sessions/{}/messages", session.id))
                 .header("Authorization", "Bearer test-api-key")
                 .body(Body::empty())
                 .unwrap(),

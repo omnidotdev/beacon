@@ -109,7 +109,7 @@ async fn test_session_persistence() {
 
     // Create user and session
     let user_repo = UserRepo::new(db.clone());
-    let session_repo = SessionRepo::new(db.clone());
+    let session_repo = SessionRepo::new(db);
 
     let user = user_repo.find_or_create("discord:12345").unwrap();
     let session = session_repo
@@ -140,7 +140,7 @@ async fn test_multiple_sessions_per_user() {
     let db = setup_test_db();
 
     let user_repo = UserRepo::new(db.clone());
-    let session_repo = SessionRepo::new(db.clone());
+    let session_repo = SessionRepo::new(db);
 
     let user = user_repo.find_or_create("user-1").unwrap();
 
@@ -196,7 +196,7 @@ async fn test_memory_storage_and_retrieval() {
     let db = setup_test_db();
 
     let user_repo = UserRepo::new(db.clone());
-    let memory_repo = MemoryRepo::new(db.clone());
+    let memory_repo = MemoryRepo::new(db);
 
     let user = user_repo.find_or_create("test-user").unwrap();
 
@@ -220,7 +220,7 @@ async fn test_memory_search() {
     let db = setup_test_db();
 
     let user_repo = UserRepo::new(db.clone());
-    let memory_repo = MemoryRepo::new(db.clone());
+    let memory_repo = MemoryRepo::new(db);
 
     let user = user_repo.find_or_create("search-user").unwrap();
 
@@ -295,7 +295,7 @@ async fn test_channel_registry() {
 async fn test_user_life_json_path() {
     let db = setup_test_db();
 
-    let user_repo = UserRepo::new(db.clone());
+    let user_repo = UserRepo::new(db);
     let user = user_repo.find_or_create("life-json-user").unwrap();
 
     // Initially no life.json path
@@ -324,7 +324,7 @@ async fn test_pinned_memories_come_first() {
     let db = setup_test_db();
 
     let user_repo = UserRepo::new(db.clone());
-    let memory_repo = MemoryRepo::new(db.clone());
+    let memory_repo = MemoryRepo::new(db);
 
     let user = user_repo.find_or_create("pinned-test-user").unwrap();
 
@@ -357,7 +357,7 @@ async fn test_channel_capabilities_default_empty() {
     let channel = MockChannel::new("test");
 
     // Default implementation returns an empty slice
-    assert!(channel.capabilities().is_empty());
+    assert_eq!(channel.capabilities(), []);
 }
 
 #[tokio::test]

@@ -652,7 +652,7 @@ mod tests {
         let pool = crate::db::init_memory().unwrap();
         let session_repo = crate::db::SessionRepo::new(pool.clone());
         let user_repo = crate::db::UserRepo::new(pool.clone());
-        let memory_repo = crate::db::MemoryRepo::new(pool.clone());
+        let memory_repo = crate::db::MemoryRepo::new(pool);
 
         // Add a memory
         let user = user_repo.find_or_create("query_test_user").unwrap();
@@ -689,9 +689,8 @@ mod tests {
     #[test]
     fn build_with_semantic_memory_uses_search_similar_when_embedding_provided() {
         let pool = crate::db::init_memory().unwrap();
-        let memory_repo = crate::db::MemoryRepo::new(pool.clone());
         let session_repo = crate::db::SessionRepo::new(pool.clone());
-        let user_repo = crate::db::UserRepo::new(pool.clone());
+        let user_repo = crate::db::UserRepo::new(pool);
 
         let config = ContextConfig::default();
         let builder = ContextBuilder::new(config);
