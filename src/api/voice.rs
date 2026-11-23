@@ -97,6 +97,26 @@ fn speech_failure(
     )
 }
 
+/// Upload filename for audio of the given `Content-Type`
+///
+/// Speech-to-text providers pick the decoder from the file extension, so
+/// browser recordings (`WebM`/Opus from Chromium and Firefox, MP4/AAC from
+/// Safari) must not be sent as `.wav`. Unknown or missing types keep `.wav`
+#[must_use]
+pub fn audio_filename(content_type: Option<&str>) -> &'static str {
+    let mime = content_type
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+
+    match mime.as_deref() {
+        Some("audio/webm" | "video/webm") => "audio.webm",
+        Some("audio/ogg") => "audio.ogg",
+        Some("audio/mp4" | "audio/m4a" | "audio/x-m4a") => "audio.m4a",
+        Some("audio/mpeg" | "audio/mp3") => "audio.mp3",
+        _ => "audio.wav",
+    }
+}
+
 /// Transcription response
 #[derive(Debug, Serialize)]
 pub struct TranscribeResponse {
@@ -105,7 +125,7 @@ pub struct TranscribeResponse {
 
 /// Transcribe audio to text
 ///
-/// Accepts audio in WAV format (audio/wav) or `WebM` format (audio/webm)
+/// Accepts WAV, `WebM`, Ogg, MP4/M4A, or MP3 audio, named by `Content-Type`
 async fn transcribe(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -118,8 +138,14 @@ async fn transcribe(
         return Err(VoiceError::BadRequest("Empty audio data"));
     }
 
+    let filename = audio_filename(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    );
+
     let transcription = synapse
-        .transcribe(body, "audio.wav", &state.stt_model)
+        .transcribe(body, filename, &state.stt_model)
         .await
         .map_err(|e| {
             speech_failure(
@@ -257,6 +283,15 @@ impl IntoResponse for VoiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_browser_recordings_by_type() {
+        assert_eq!(audio_filename(Some("audio/webm;codecs=opus")), "audio.webm");
+        assert_eq!(audio_filename(Some("audio/mp4")), "audio.m4a");
+        assert_eq!(audio_filename(Some("audio/ogg; codecs=opus")), "audio.ogg");
+        assert_eq!(audio_filename(Some("audio/wav")), "audio.wav");
+        assert_eq!(audio_filename(None), "audio.wav");
+    }
 
     async fn body_json(response: Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
